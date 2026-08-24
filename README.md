@@ -7,7 +7,8 @@ ELF loading, and interrupt handling are all implemented here.
 
 ## Status
 
-🚧 In progress — Milestone 1 of 6 complete (toolchain bootstrap).
+🚧 In progress — Milestone 1 of 6 underway: the UEFI bootloader crate
+builds; QEMU/OVMF boot verification lands with the `xtask` runner.
 
 See [docs/superpowers/specs/2026-08-23-uefi-bootloader-kernel-design.md](docs/superpowers/specs/2026-08-23-uefi-bootloader-kernel-design.md)
 for the full design, and
@@ -16,7 +17,7 @@ per milestone.
 
 ## Roadmap
 
-- [x] 1. Toolchain bootstrap — empty UEFI app boots in QEMU/OVMF
+- [ ] 1. Toolchain bootstrap — empty UEFI app boots in QEMU/OVMF
 - [ ] 2. Bootloader: ELF loader, memory map, framebuffer, handoff to kernel
 - [ ] 3. Kernel: GDT, IDT, double-fault handler
 - [ ] 4. Kernel: PIT timer + PS/2 keyboard interrupts, framebuffer text
