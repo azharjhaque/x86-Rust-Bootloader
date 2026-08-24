@@ -3,8 +3,8 @@
 A from-scratch UEFI bootloader and minimal kernel for x86_64, written in
 Rust with no OS-provided runtime. Built to learn Rust systems programming
 and OS internals — no `bootloader` crate, no borrowed kernel: the boot flow,
-ELF loading, and interrupt handling are implemented here rather than
-delegated to an existing library.
+ELF loading, and interrupt handling are all implemented from scratch here
+rather than delegated to an existing library, milestone by milestone.
 
 ## Status
 
