@@ -270,10 +270,8 @@ ELF loading, and interrupt handling are all implemented here.
 
 🚧 In progress — Milestone 1 of 6 complete (toolchain bootstrap).
 
-See [docs/superpowers/specs/2026-08-23-uefi-bootloader-kernel-design.md](docs/superpowers/specs/2026-08-23-uefi-bootloader-kernel-design.md)
-for the full design, and
-[docs/superpowers/plans/](docs/superpowers/plans/) for implementation plans
-per milestone.
+See [docs/design.md](docs/design.md) for the full design, and
+[docs/plans/](docs/plans/) for implementation plans per milestone.
 
 ## Roadmap
 
