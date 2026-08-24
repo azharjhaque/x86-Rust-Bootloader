@@ -22,7 +22,7 @@ target — this target ships precompiled `no_std` support since Rust 1.67, so
 no `-Z build-std` is needed for this crate), `uefi` crate 0.39.0, WSL2 +
 Ubuntu, QEMU (`qemu-system-x86_64`) + OVMF firmware via `apt`.
 
-**Spec:** [docs/superpowers/specs/2026-08-23-uefi-bootloader-kernel-design.md](../specs/2026-08-23-uefi-bootloader-kernel-design.md)
+**Spec:** [docs/design.md](../design.md)
 
 ## Global Constraints
 
@@ -89,11 +89,11 @@ time — run it in a real terminal if it's not already cached.
 - [ ] **Step 4: Verify QEMU and OVMF are present**
 
 ```bash
-wsl -d Ubuntu -- bash -lc "qemu-system-x86_64 --version && ls /usr/share/OVMF/OVMF_CODE.fd /usr/share/OVMF/OVMF_VARS.fd"
+wsl -d Ubuntu -- bash -lc "qemu-system-x86_64 --version && ls /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_VARS_4M.fd"
 ```
 
-Expected: a QEMU version string, and both `OVMF_CODE.fd` and `OVMF_VARS.fd`
-listed with no "No such file" errors.
+Expected: a QEMU version string, and both `OVMF_CODE_4M.fd` and
+`OVMF_VARS_4M.fd` listed with no "No such file" errors.
 
 - [ ] **Step 5: Install Rust nightly via rustup inside WSL**
 
@@ -186,9 +186,14 @@ This means anyone (including CI later) who runs `cargo` inside this repo
 automatically gets the right toolchain, components, and target installed by
 rustup without manual setup.
 
-- [ ] **Step 3: Create `.gitignore`**
+- [ ] **Step 3: Append to `.gitignore`**
+
+`.gitignore` already exists (from the worktree setup) with a `.worktrees/`
+line; append the `/target/` line rather than overwriting the file, so both
+are ignored:
 
 ```
+.worktrees/
 /target/
 ```
 
@@ -217,6 +222,8 @@ that logs the panic and hangs — we don't need to write our own for now.
 #![no_main]
 #![no_std]
 
+use core::time::Duration;
+
 use uefi::boot;
 use uefi::prelude::*;
 
@@ -226,7 +233,7 @@ fn main() -> Status {
 
     log::info!("Rust_BL bootloader: milestone 1 toolchain smoke test");
 
-    boot::stall(2_000_000); // 2 seconds, so the log line is visible on screen
+    boot::stall(Duration::from_secs(2)); // so the log line is visible on screen
 
     Status::SUCCESS
 }
@@ -321,8 +328,8 @@ wsl -d Ubuntu -- bash -lc "cd ~/projects/Rust_BL && git add Cargo.toml rust-tool
 
 **Interfaces:**
 - Consumes: `target/x86_64-unknown-uefi/debug/bootloader.efi` (from Task 2),
-  `/usr/share/OVMF/OVMF_CODE.fd` and `/usr/share/OVMF/OVMF_VARS.fd` (from
-  Task 1).
+  `/usr/share/OVMF/OVMF_CODE_4M.fd` and `/usr/share/OVMF/OVMF_VARS_4M.fd`
+  (from Task 1).
 - Produces: the `cargo xtask run` command, which later milestones' plans
   will extend rather than replace. `qemu_exit::exit(QemuExitCode) -> !` is
   the function later milestone code should call to report a scripted
@@ -371,6 +378,8 @@ Replace the body of `bootloader/src/main.rs` with:
 #![no_main]
 #![no_std]
 
+use core::time::Duration;
+
 use uefi::boot;
 use uefi::prelude::*;
 
@@ -382,7 +391,7 @@ fn main() -> Status {
 
     log::info!("Rust_BL bootloader: milestone 1 toolchain smoke test");
 
-    boot::stall(2_000_000); // 2 seconds, so the log line is visible on screen
+    boot::stall(Duration::from_secs(2)); // so the log line is visible on screen
 
     qemu_exit::exit(qemu_exit::QemuExitCode::Success)
 }
@@ -423,8 +432,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
-const OVMF_CODE: &str = "/usr/share/OVMF/OVMF_CODE.fd";
-const OVMF_VARS_SRC: &str = "/usr/share/OVMF/OVMF_VARS.fd";
+const OVMF_CODE: &str = "/usr/share/OVMF/OVMF_CODE_4M.fd";
+const OVMF_VARS_SRC: &str = "/usr/share/OVMF/OVMF_VARS_4M.fd";
 // Matches qemu_exit::QemuExitCode::Success (0x10): QEMU maps a written
 // value `v` to process exit code `(v << 1) | 1`.
 const EXPECTED_EXIT_CODE: i32 = 33;
@@ -505,8 +514,8 @@ fn copy_ovmf_vars() -> PathBuf {
 }
 ```
 
-QEMU is given its own writable copy of `OVMF_VARS.fd` (rather than pointing
-directly at `/usr/share/OVMF/OVMF_VARS.fd`) because QEMU writes UEFI
+QEMU is given its own writable copy of `OVMF_VARS_4M.fd` (rather than
+pointing directly at `/usr/share/OVMF/OVMF_VARS_4M.fd`) because QEMU writes UEFI
 variable state back into that file, and the system-wide copy should stay
 read-only and shared across runs.
 
@@ -573,3 +582,16 @@ at which point the `boot_info` shared crate is introduced. That plan should
 be written fresh (via superpowers:writing-plans) once Milestone 1 is merged,
 rather than pre-written here, since its exact shape depends on details only
 visible after this toolchain is proven out.
+
+## Deviations during execution
+
+- The `ovmf` package on this system ships only the 4MB-flash OVMF build
+  (`OVMF_CODE_4M.fd` / `OVMF_VARS_4M.fd`), not the plain `OVMF_CODE.fd` /
+  `OVMF_VARS.fd` this plan originally referenced. All paths and constants
+  were adjusted to the `_4M` filenames.
+- `uefi` 0.39.0 changed `boot::stall` to take a `core::time::Duration`
+  instead of a raw microsecond `usize`; call sites use
+  `boot::stall(Duration::from_secs(2))` with `use core::time::Duration;`.
+- `.gitignore` already existed (with a `.worktrees/` line, from the worktree
+  setup) by the time Task 2 ran, so its `/target/` line was appended rather
+  than the file being created fresh.

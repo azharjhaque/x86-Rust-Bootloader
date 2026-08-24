@@ -10,7 +10,9 @@ mod qemu_exit;
 
 #[entry]
 fn main() -> Status {
-    uefi::helpers::init().unwrap();
+    if uefi::helpers::init().is_err() {
+        qemu_exit::exit(qemu_exit::QemuExitCode::Failed);
+    }
 
     log::info!("Rust_BL bootloader: milestone 1 toolchain smoke test");
 
