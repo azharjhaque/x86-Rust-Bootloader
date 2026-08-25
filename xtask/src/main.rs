@@ -51,6 +51,11 @@ fn run() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    if let Err(msg) = build_kernel(&root) {
+        eprintln!("FAIL: {msg}");
+        return ExitCode::FAILURE;
+    }
+
     let esp_dir = match stage_esp(&root) {
         Ok(dir) => dir,
         Err(msg) => {
@@ -158,6 +163,18 @@ fn build_bootloader(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn build_kernel(root: &Path) -> Result<(), String> {
+    let status = Command::new(env!("CARGO"))
+        .args(["build", "-p", "kernel", "--target", "x86_64-unknown-none"])
+        .current_dir(root)
+        .status()
+        .map_err(|e| format!("failed to run cargo build for kernel: {e}"))?;
+    if !status.success() {
+        return Err("cargo build failed for kernel".to_string());
+    }
+    Ok(())
+}
+
 fn stage_esp(root: &Path) -> Result<PathBuf, String> {
     let esp_boot_dir = root.join("target/esp/EFI/BOOT");
     fs::create_dir_all(&esp_boot_dir)
@@ -169,6 +186,11 @@ fn stage_esp(root: &Path) -> Result<PathBuf, String> {
     .map_err(|e| {
         format!("failed to copy bootloader.efi into the ESP (did the build produce it?): {e}")
     })?;
+    fs::copy(
+        root.join("target/x86_64-unknown-none/debug/kernel"),
+        root.join("target/esp/kernel.elf"),
+    )
+    .map_err(|e| format!("failed to copy kernel into the ESP (did the build produce it?): {e}"))?;
     Ok(root.join("target/esp"))
 }
 

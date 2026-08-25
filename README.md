@@ -28,11 +28,11 @@ See [docs/design.md](docs/design.md) for the full design, and
 
 ```
 ├── bootloader/   # UEFI application (PE32+), no_std, x86_64-unknown-uefi
+├── boot_info/    # shared #[repr(C)] handoff ABI between the two
+├── kernel/       # freestanding kernel ELF, no_std, x86_64-unknown-none
 ├── xtask/        # build automation: stages the ESP, launches QEMU
 └── docs/         # design spec and per-milestone implementation plans
 ```
-
-(`kernel/` and `boot_info/` arrive in Milestone 2.)
 
 ## Prerequisites
 

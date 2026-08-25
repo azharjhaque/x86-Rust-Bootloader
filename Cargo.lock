@@ -15,6 +15,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 
 [[package]]
+name = "boot_info"
+version = "0.1.0"
+
+[[package]]
 name = "bootloader"
 version = "0.1.0"
 dependencies = [
@@ -27,6 +31,13 @@ name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
+
+[[package]]
+name = "kernel"
+version = "0.1.0"
+dependencies = [
+ "boot_info",
+]
 
 [[package]]
 name = "log"
