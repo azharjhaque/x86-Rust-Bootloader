@@ -488,13 +488,17 @@ git commit -m "Add boot_info ABI crate and kernel skeleton, staged into the ESP"
 
 - [ ] **Step 1: Enable `alloc` in the bootloader**
 
-`bootloader/Cargo.toml` — the `uefi` crate's `alloc` feature installs a
-global allocator backed by UEFI pool memory, which is what lets us read a
-file into a `Vec` before we know its size at compile time:
+`bootloader/Cargo.toml` — the `uefi` crate's `alloc` feature enables `alloc`
+crate types like `Vec`, but does not by itself install a global allocator;
+that is the separate `global_allocator` feature, which backs it with UEFI
+pool memory. The `logger` feature is also required for `log::info!`/
+`log::error!` calls to reach the console at all — without it, `uefi::
+helpers::init()` never registers a `log::Log` implementation and every log
+call is silently a no-op:
 
 ```toml
 [dependencies]
-uefi = { version = "0.39.0", features = ["panic_handler", "alloc"] }
+uefi = { version = "0.39.0", features = ["panic_handler", "alloc", "global_allocator", "logger"] }
 log = "0.4"
 ```
 
@@ -515,8 +519,10 @@ use uefi::{CStr16, Status};
 /// Read an entire file from the root of the volume this image was loaded
 /// from.
 ///
-/// Returns [`Status::NOT_FOUND`] if the file does not exist, and
-/// [`Status::INVALID_PARAMETER`] if the name refers to a directory.
+/// Returns [`Status::NOT_FOUND`] if the file does not exist,
+/// [`Status::INVALID_PARAMETER`] if the name refers to a directory, and
+/// [`Status::END_OF_FILE`] if the file is shorter than its own reported
+/// size.
 pub fn read_file(name: &CStr16) -> Result<Vec<u8>, Status> {
     // The image handle identifies the device we were booted from, so
     // this lands on the same ESP that holds BOOTX64.EFI.
@@ -539,8 +545,17 @@ pub fn read_file(name: &CStr16) -> Result<Vec<u8>, Status> {
     let size = info.file_size() as usize;
 
     let mut buffer = vec![0u8; size];
-    let read = file.read(&mut buffer).map_err(|e| e.status())?;
-    buffer.truncate(read);
+    let mut filled = 0usize;
+    while filled < size {
+        let read = file.read(&mut buffer[filled..]).map_err(|e| e.status())?;
+        if read == 0 {
+            // EOF before we got the bytes the file's own metadata promised.
+            // Returning a short buffer here would surface later as a
+            // baffling ELF parse error, so fail where the cause is obvious.
+            return Err(Status::END_OF_FILE);
+        }
+        filled += read;
+    }
 
     Ok(buffer)
 }
