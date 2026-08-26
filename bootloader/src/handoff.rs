@@ -27,8 +27,15 @@ pub fn allocate_kernel_stack() -> Result<u64, Status> {
     let bottom = ptr.as_ptr() as u64;
     let top = bottom + (KERNEL_STACK_PAGES * PAGE_SIZE) as u64;
 
-    // The SysV ABI wants 16-byte alignment at the call boundary.
-    Ok(top & !0xf)
+    // The SysV ABI guarantees `rsp + 8` is 16-byte aligned at a function's
+    // entry point: an ordinary callee is reached by `call`, which pushes an
+    // 8-byte return address, so it sees `rsp % 16 == 8`. The kernel's
+    // `_start` is compiled as an ordinary `extern "sysv64"` fn and assumes
+    // exactly that. We arrive by `jmp` and push nothing, so we must bias the
+    // stack pointer by 8 ourselves — otherwise every stack slot LLVM believes
+    // is 16-byte aligned is misaligned, and the first aligned SSE spill
+    // faults with no logger left to report it.
+    Ok((top & !0xf) - 8)
 }
 
 /// Exit boot services, fill in the memory map, and jump to the kernel.

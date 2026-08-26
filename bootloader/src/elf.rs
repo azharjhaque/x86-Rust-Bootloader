@@ -241,6 +241,13 @@ fn load_segment(image: &[u8], segment: &LoadSegment) -> Result<(), ElfError> {
     // `AllocateType::Address` demands these exact pages. If UEFI has
     // already put something there, this fails rather than silently
     // loading the kernel somewhere it was not linked for.
+    //
+    // NOTE: each PT_LOAD segment's pages are claimed independently, so two
+    // segments whose page-aligned ranges overlap will fail here with
+    // AllocationFailed rather than sharing the page. kernel.ld's ALIGN(4K)
+    // per section keeps them apart, and kernel/build.rs passes `-z norelro`
+    // for the same reason — RELRO would otherwise carve a non-page-aligned
+    // .got segment onto .rodata's page.
     boot::allocate_pages(
         AllocateType::Address(page_start),
         MemoryType::LOADER_DATA,

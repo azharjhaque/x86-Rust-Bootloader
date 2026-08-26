@@ -49,6 +49,11 @@ fn main() -> Status {
         loaded.size
     );
 
+    // The image is fully copied into the kernel's own pages now, and main()
+    // diverges so this Vec's destructor would never run. Free it while boot
+    // services still can, instead of leaking ~768 KB into the memory map.
+    drop(kernel_image);
+
     let framebuffer = match graphics::open_framebuffer() {
         Ok(info) => info,
         Err(status) => {
