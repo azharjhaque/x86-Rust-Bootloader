@@ -6,4 +6,5 @@ publish = false
 
 [dependencies]
 uefi = { version = "0.39.0", features = ["panic_handler", "alloc", "global_allocator", "logger"] }
+boot_info = { path = "../boot_info" }
 log = "0.4"

@@ -22,6 +22,7 @@ version = "0.1.0"
 name = "bootloader"
 version = "0.1.0"
 dependencies = [
+ "boot_info",
  "log",
  "uefi",
 ]

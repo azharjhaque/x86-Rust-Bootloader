@@ -11,6 +11,8 @@ use uefi::prelude::*;
 
 mod elf;
 mod file;
+mod graphics;
+mod memory;
 mod qemu_exit;
 
 #[entry]
@@ -46,6 +48,35 @@ fn main() -> Status {
         loaded.base,
         loaded.size
     );
+
+    let framebuffer = match graphics::open_framebuffer() {
+        Ok(info) => info,
+        Err(status) => {
+            log::error!("failed to open framebuffer: {status:?}");
+            qemu_exit::exit(qemu_exit::QemuExitCode::Failed);
+        }
+    };
+
+    log::info!(
+        "framebuffer: {}x{} stride={} addr={:#x} size={:#x} format={:?}",
+        framebuffer.width,
+        framebuffer.height,
+        framebuffer.stride,
+        framebuffer.addr,
+        framebuffer.size,
+        framebuffer.pixel_format
+    );
+
+    let (_regions_ptr, regions_capacity) =
+        match memory::allocate_region_array(memory::REGION_CAPACITY) {
+            Ok(pair) => pair,
+            Err(status) => {
+                log::error!("failed to allocate memory-region array: {status:?}");
+                qemu_exit::exit(qemu_exit::QemuExitCode::Failed);
+            }
+        };
+
+    log::info!("memory-region array: capacity={regions_capacity}");
 
     boot::stall(Duration::from_secs(2)); // so the log line is visible on screen
 
