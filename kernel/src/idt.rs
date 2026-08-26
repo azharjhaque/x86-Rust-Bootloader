@@ -167,11 +167,26 @@ pub extern "x86-interrupt" fn double_fault_handler(
     frame: InterruptStackFrame,
     _error_code: u64,
 ) -> ! {
+    // Read the live stack pointer. This is the one that proves the IST
+    // switch happened: `frame.stack_pointer` below is the *interrupted*
+    // code's RSP, because the CPU loads RSP from the IST entry and then
+    // pushes the old SS:RSP onto that new stack. The two are supposed to
+    // differ — that difference is the whole point of an IST gate.
+    let handler_rsp: u64;
+    unsafe { core::arch::asm!("mov {}, rsp", out(reg) handler_rsp, options(nomem, nostack, preserves_flags)) };
+
+    let (fault_lo, fault_hi) = crate::gdt::fault_stack_range();
+
     crate::kprintln!("EXCEPTION: double fault");
     crate::kprintln!("  faulting instruction: {:#x}", frame.instruction_pointer);
-    crate::kprintln!("  stack pointer:        {:#x}", frame.stack_pointer);
-    crate::kprintln!("  (fault stack spans {:#x}..{:#x})", crate::gdt::fault_stack_range().0, crate::gdt::fault_stack_range().1);
-    crate::kprintln!("  caught on the IST stack — the machine did not reset");
+    crate::kprintln!("  interrupted stack:    {:#x}", frame.stack_pointer);
+    crate::kprintln!("  handler stack:        {:#x}", handler_rsp);
+    crate::kprintln!("  fault stack spans:    {fault_lo:#x}..{fault_hi:#x}");
+    if handler_rsp >= fault_lo && handler_rsp < fault_hi {
+        crate::kprintln!("  handler is running on the IST stack — the machine did not reset");
+    } else {
+        crate::kprintln!("  WARNING: handler is NOT on the IST stack; the switch did not happen");
+    }
 
     crate::qemu_exit::exit(crate::qemu_exit::QemuExitCode::Success)
 }

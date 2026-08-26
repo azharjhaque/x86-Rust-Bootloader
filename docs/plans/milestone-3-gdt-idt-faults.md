@@ -874,14 +874,36 @@ pub extern "x86-interrupt" fn double_fault_handler(
     frame: InterruptStackFrame,
     _error_code: u64,
 ) -> ! {
+    // Read the live stack pointer. This is the one that proves the IST
+    // switch happened: `frame.stack_pointer` below is the *interrupted*
+    // code's RSP, because the CPU loads RSP from the IST entry and then
+    // pushes the old SS:RSP onto that new stack. The two are supposed to
+    // differ — that difference is the whole point of an IST gate.
+    let handler_rsp: u64;
+    unsafe { core::arch::asm!("mov {}, rsp", out(reg) handler_rsp, options(nomem, nostack, preserves_flags)) };
+
+    let (fault_lo, fault_hi) = crate::gdt::fault_stack_range();
+
     crate::kprintln!("EXCEPTION: double fault");
     crate::kprintln!("  faulting instruction: {:#x}", frame.instruction_pointer);
-    crate::kprintln!("  stack pointer:        {:#x}", frame.stack_pointer);
-    crate::kprintln!("  caught on the IST stack — the machine did not reset");
+    crate::kprintln!("  interrupted stack:    {:#x}", frame.stack_pointer);
+    crate::kprintln!("  handler stack:        {:#x}", handler_rsp);
+    crate::kprintln!("  fault stack spans:    {fault_lo:#x}..{fault_hi:#x}");
+    if handler_rsp >= fault_lo && handler_rsp < fault_hi {
+        crate::kprintln!("  handler is running on the IST stack — the machine did not reset");
+    } else {
+        crate::kprintln!("  WARNING: handler is NOT on the IST stack; the switch did not happen");
+    }
 
     crate::qemu_exit::exit(crate::qemu_exit::QemuExitCode::Success)
 }
 ```
+
+Note: `frame.stack_pointer` is architecturally the *interrupted* code's RSP,
+not the IST stack's — the CPU loads RSP from the IST entry before pushing
+the old SS:RSP onto it, so the frame necessarily records the pre-fault
+stack. The handler's own live RSP (`handler_rsp` above) is what proves the
+switch; the two values are supposed to differ. See Step 5 below.
 
 - [ ] **Step 2: Register it on the IST stack**
 
@@ -932,28 +954,37 @@ about to raise #UD with no vector-6 handler installed;
 the CPU should escalate it to a double fault...
 EXCEPTION: double fault
   faulting instruction: 0x2003xx
-  stack pointer:        0x...
-  caught on the IST stack — the machine did not reset
+  interrupted stack:    0x...
+  handler stack:        0x...
+  fault stack spans:    0x...
+  handler is running on the IST stack — the machine did not reset
 PASS: bootloader exited with expected code 33
 ```
 
 If instead the run ends with `FAIL: expected exit code 33, got ...` and no
 double-fault output, the machine triple-faulted: the IDT entry, the IST
 index, or the TSS is wrong. If it ends with the `ud2 did not fault` line,
-the exception never fired at all.
+the exception never fired at all. If it prints `WARNING: handler is NOT on
+the IST stack`, the double fault was caught but did not actually run on the
+dedicated stack — check the IST index and the TSS's IST slot.
 
 - [ ] **Step 5: Confirm the IST switch actually happened**
 
-The printed stack pointer should fall inside the fault stack, not the main
-kernel stack the bootloader allocated. Add a temporary line to
-`double_fault_handler` printing the expected range, run once, and confirm
-the frame's `stack_pointer` lies within it:
+Do **not** check this by comparing `frame.stack_pointer` to the fault-stack
+range — it will never be inside it. That field is architecturally the
+*interrupted* code's RSP: on an IST gate the CPU loads RSP from the IST
+entry first and only then pushes the old SS:RSP onto that new stack, so the
+frame necessarily records the pre-fault stack, not the one it was pushed
+onto. Comparing it against the fault-stack range is a check that can never
+pass, regardless of whether the IST switch worked.
 
-```rust
-    crate::kprintln!("  (fault stack spans {:#x}..{:#x})", crate::gdt::fault_stack_range().0, crate::gdt::fault_stack_range().1);
-```
-
-and in `kernel/src/gdt.rs`:
+The correct proof is the handler's own *live* RSP, read from the register
+while the handler is running — that value is on whichever stack the CPU
+actually switched to. `double_fault_handler` (Step 1 above) already does
+this: it reads `handler_rsp` via inline `asm!("mov {}, rsp", ...)`, prints
+it alongside `frame.stack_pointer` and `crate::gdt::fault_stack_range()`,
+and checks `handler_rsp` against that range itself, printing a `WARNING`
+line if it falls outside. Add `fault_stack_range()` to `kernel/src/gdt.rs`:
 
 ```rust
 /// The address range of the double-fault stack, for diagnostics.
@@ -963,8 +994,13 @@ pub fn fault_stack_range() -> (u64, u64) {
 }
 ```
 
-Once confirmed, keep both — a fault report that shows which stack it ran on
-is worth the six lines.
+Run once and confirm `handler stack` falls inside `fault stack spans` and
+the "running on the IST stack" line prints, not the `WARNING`. `frame.
+stack_pointer` (the interrupted stack) will be a completely different,
+much larger address — that's expected, not a failure. Keep all of it: a
+fault report that shows both stacks and states the comparison outright is
+worth the extra lines, and it turns a future TSS/IST regression into a
+visible `WARNING` instead of a silent, misleading pair of numbers.
 
 - [ ] **Step 6: Confirm the failure path is unaffected**
 
