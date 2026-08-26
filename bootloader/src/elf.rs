@@ -60,18 +60,23 @@ pub struct LoadedKernel {
 /// Read a little-endian `u16`/`u32`/`u64` at `offset`, or `None` if the
 /// slice is too short. Hand-rolled rather than using `from_le_bytes` on a
 /// fixed array so a truncated file returns an error instead of panicking.
+/// The end of the read is computed with `checked_add` before indexing so a
+/// near-`usize::MAX` offset cannot wrap around and pass the bounds check.
 fn read_u16(bytes: &[u8], offset: usize) -> Option<u16> {
-    let slice = bytes.get(offset..offset + 2)?;
+    let end = offset.checked_add(2)?;
+    let slice = bytes.get(offset..end)?;
     Some(u16::from_le_bytes([slice[0], slice[1]]))
 }
 
 fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
-    let slice = bytes.get(offset..offset + 4)?;
+    let end = offset.checked_add(4)?;
+    let slice = bytes.get(offset..end)?;
     Some(u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]))
 }
 
 fn read_u64(bytes: &[u8], offset: usize) -> Option<u64> {
-    let slice = bytes.get(offset..offset + 8)?;
+    let end = offset.checked_add(8)?;
+    let slice = bytes.get(offset..end)?;
     Some(u64::from_le_bytes([
         slice[0], slice[1], slice[2], slice[3], slice[4], slice[5], slice[6], slice[7],
     ]))
@@ -135,7 +140,23 @@ pub fn load_kernel(image: &[u8]) -> Result<LoadedKernel, ElfError> {
     let mut loaded_any = false;
 
     for index in 0..phnum as usize {
-        let base = phoff as usize + index * phentsize as usize;
+        // Compute this header's offset with checked arithmetic in u64: a
+        // crafted `e_phoff`/`e_phnum` must not be able to wrap the
+        // computation and land `base` somewhere bogus but in-bounds.
+        let base = phoff
+            .checked_add(
+                (index as u64)
+                    .checked_mul(phentsize as u64)
+                    .ok_or(ElfError::BadProgramHeaders)?,
+            )
+            .ok_or(ElfError::BadProgramHeaders)? as usize;
+
+        // Check the whole 56-byte header is present before reading any of
+        // its fields.
+        let header_end = base.checked_add(PHDR_SIZE).ok_or(ElfError::BadProgramHeaders)?;
+        if header_end > image.len() {
+            return Err(ElfError::BadProgramHeaders);
+        }
 
         let p_type = read_u32(image, base).ok_or(ElfError::BadProgramHeaders)?;
         if p_type != PT_LOAD {
@@ -161,14 +182,18 @@ pub fn load_kernel(image: &[u8]) -> Result<LoadedKernel, ElfError> {
             return Err(ElfError::SegmentOutOfBounds);
         }
 
-        load_segment(image, &segment)?;
-        loaded_any = true;
-
+        // Compute the segment's memory end BEFORE loading: this same
+        // overflow would otherwise wrap `padding + memsz` inside
+        // load_segment and under-allocate the destination.
         let seg_start = align_down(segment.vaddr);
         let seg_end = segment
             .vaddr
             .checked_add(segment.memsz)
             .ok_or(ElfError::SegmentOutOfBounds)?;
+
+        load_segment(image, &segment)?;
+        loaded_any = true;
+
         lowest = lowest.min(seg_start);
         highest = highest.max(seg_end);
     }
@@ -195,7 +220,22 @@ fn load_segment(image: &[u8], segment: &LoadSegment) -> Result<(), ElfError> {
     // far into the first page the segment actually starts.
     let page_start = align_down(segment.vaddr);
     let padding = segment.vaddr - page_start;
-    let total = padding + segment.memsz;
+    // This loader is called after `load_kernel` has already validated
+    // `vaddr.checked_add(memsz)`, but that guard belongs to the caller —
+    // guard here too so this function stays safe on its own, independent
+    // of call order.
+    let total = padding
+        .checked_add(segment.memsz)
+        .ok_or(ElfError::SegmentOutOfBounds)?;
+
+    // A legal but empty `PT_LOAD` segment (`p_memsz == 0`) needs no
+    // allocation at all. `allocate_pages` rejects a zero page count, so
+    // without this early return a harmless empty segment would abort the
+    // whole load with a misleading `AllocationFailed`.
+    if total == 0 {
+        return Ok(());
+    }
+
     let pages = total.div_ceil(PAGE_SIZE) as usize;
 
     // `AllocateType::Address` demands these exact pages. If UEFI has
@@ -208,6 +248,17 @@ fn load_segment(image: &[u8], segment: &LoadSegment) -> Result<(), ElfError> {
     )
     .map_err(|_| ElfError::AllocationFailed)?;
 
+    // SAFETY: `allocate_pages(AllocateType::Address(page_start), ...)`
+    // above succeeded, which means UEFI just handed us `pages` fresh,
+    // free pages starting at `page_start` — so the whole
+    // `[page_start, page_start + pages * PAGE_SIZE)` range is valid to
+    // write through a raw pointer. `image` is a live `Vec<u8>` allocation
+    // made by the boot-time global allocator, entirely separate from the
+    // page-allocator's memory map, so `src`'s `filesz`-byte range cannot
+    // overlap `dst`'s range inside the pages we were just granted,
+    // satisfying `copy_nonoverlapping`'s non-overlap requirement. The
+    // pages are ordinary conventional (identity-mapped, no active paging
+    // yet) memory, so they are both readable and writable.
     unsafe {
         // Zero the whole allocation first. That covers the padding at the
         // front, the .bss tail at the back, and any gap in between — one
