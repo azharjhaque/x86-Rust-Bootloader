@@ -69,7 +69,14 @@ impl Entry {
         // The IST field is 1-based in the descriptor: 0 means "no IST", so
         // slot 0 of the table is encoded as 1.
         self.ist = match ist_index {
-            Some(index) => index + 1,
+            // Hardware IST slots are 1-7; the gate field is 3 bits and 0
+            // means "no IST". A bad index here would select an
+            // uninitialized TSS slot (RSP = 0) and fault while pushing the
+            // exception frame — a triple fault with nothing to show for it.
+            Some(index) => {
+                debug_assert!(index < 7, "IST index out of range");
+                (index + 1) & 0b111
+            }
             None => 0,
         };
         self.type_attributes = INTERRUPT_GATE;
@@ -88,6 +95,12 @@ impl Idt {
         Self { entries: [Entry::missing(); 256] }
     }
 }
+
+// These are hardware layouts, not Rust's to choose. A reordered field or a
+// changed type would still compile and would fault at the first exception,
+// with no diagnostic. Catch it here instead.
+const _: () = assert!(size_of::<Entry>() == 16);
+const _: () = assert!(size_of::<Idt>() == 4096);
 
 static mut IDT: Idt = Idt::new();
 

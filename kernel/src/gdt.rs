@@ -29,9 +29,16 @@ const FAULT_STACK_SIZE: usize = 4096 * 4;
 
 /// The stack the double-fault handler runs on.
 ///
+/// Wrapped in an aligned newtype rather than a bare `[u8; N]`: the CPU
+/// aligns RSP down to 16 bytes on IST entry, so a misaligned top would
+/// still work, but the invariant is load-bearing and belongs in the
+/// declaration rather than in a reader's head.
+#[repr(C, align(16))]
+struct FaultStack([u8; FAULT_STACK_SIZE]);
+
 /// `static mut` rather than an allocation because the kernel has no
 /// allocator. It lives in `.bss`, which the bootloader's ELF loader zeroes.
-static mut FAULT_STACK: [u8; FAULT_STACK_SIZE] = [0; FAULT_STACK_SIZE];
+static mut FAULT_STACK: FaultStack = FaultStack([0; FAULT_STACK_SIZE]);
 
 /// The 64-bit Task State Segment.
 ///
@@ -71,6 +78,12 @@ impl TaskStateSegment {
         }
     }
 }
+
+// 104 bytes is the architectural size of a 64-bit TSS. Plain repr(C) would
+// give the u64 fields align 8, shifting IST1 from offset 36 to 40 and the
+// struct to 112 — ltr would accept it and every IST slot the CPU read would
+// be 4 bytes off.
+const _: () = assert!(size_of::<TaskStateSegment>() == 104);
 
 static mut TSS: TaskStateSegment = TaskStateSegment::new();
 
