@@ -81,6 +81,16 @@ fn run() -> ExitCode {
         .arg(format!("format=raw,file=fat:rw:{}", esp_dir.display()))
         .arg("-device")
         .arg("isa-debug-exit,iobase=0xf4,iosize=0x04")
+        // Without this, a triple fault (reset) makes QEMU reboot the
+        // firmware and try again instead of exiting. Milestone 3 starts
+        // writing fault-handling code, where a bad interrupt/exception
+        // path triple-faults rather than panicking cleanly, so this
+        // matters starting now: with the default reboot-on-triple-fault
+        // behavior, a fault silently loops until QEMU_TIMEOUT kills it 60
+        // seconds later and reports a generic "boot hang", instead of
+        // exiting immediately so the "expected 33, got N" branch below can
+        // report it right away.
+        .arg("-no-reboot")
         .arg("-m")
         .arg("256M")
         .arg("-display")

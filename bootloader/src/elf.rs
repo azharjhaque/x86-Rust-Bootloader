@@ -44,6 +44,8 @@ pub enum ElfError {
     NoLoadableSegments,
     /// UEFI refused to give us the pages the segment asked for.
     AllocationFailed,
+    /// The entry point does not fall inside any loaded segment.
+    EntryOutOfRange,
 }
 
 /// Where a loaded kernel ended up in physical memory.
@@ -202,6 +204,19 @@ pub fn load_kernel(image: &[u8]) -> Result<LoadedKernel, ElfError> {
         return Err(ElfError::NoLoadableSegments);
     }
 
+    // A corrupted e_entry passes every other check and only fails after
+    // ExitBootServices, where a bad jump is an un-diagnosable triple fault.
+    // Catch it here, while we can still report an error.
+    if entry < lowest || entry >= highest {
+        return Err(ElfError::EntryOutOfRange);
+    }
+
+    // `highest` is the end of the last segment's *used* bytes, not the end
+    // of the last page the loader actually claimed from
+    // `allocate_pages`/`load_segment`. Round up so `size` reports the true
+    // span of pages the kernel image occupies.
+    let highest = align_up(highest);
+
     Ok(LoadedKernel {
         entry,
         base: lowest,
@@ -211,6 +226,13 @@ pub fn load_kernel(image: &[u8]) -> Result<LoadedKernel, ElfError> {
 
 fn align_down(value: u64) -> u64 {
     value & !(PAGE_SIZE - 1)
+}
+
+/// Round `value` up to the next page boundary. `value` must be small
+/// enough that the rounding cannot overflow `u64` — true for anything
+/// this loader deals with (physical addresses well below `u64::MAX`).
+fn align_up(value: u64) -> u64 {
+    (value + (PAGE_SIZE - 1)) & !(PAGE_SIZE - 1)
 }
 
 /// Allocate the pages one segment needs and copy it into place.

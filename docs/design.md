@@ -43,7 +43,7 @@ Cargo workspace with four crates:
 ```
 Rust_BL/
 ├── bootloader/     # UEFI application (PE32+), no_std, target x86_64-unknown-uefi
-├── kernel/         # freestanding kernel ELF, no_std, custom target JSON
+├── kernel/         # freestanding kernel ELF, no_std, target x86_64-unknown-none
 ├── boot_info/      # shared #[repr(C)] crate: the handoff struct/ABI
 └── xtask/          # build automation: assembles disk image, launches QEMU
 ```
@@ -95,10 +95,16 @@ two places.
 ## Toolchain
 
 - Rust **nightly** with the `rust-src` component (`rustup component add
-  rust-src --toolchain nightly`), required for `-Z build-std=core,alloc`.
+  rust-src --toolchain nightly`).
 - `uefi` crate for the bootloader's boot-services bindings.
-- Custom target JSON for the kernel (freestanding `x86_64`, kernel code
-  model, soft-float where applicable).
+- The kernel targets the built-in Tier 2 `x86_64-unknown-none` target
+  (`rustup target add x86_64-unknown-none`) rather than a custom target
+  JSON: it already defaults to the kernel code model, no red zone, and no
+  SSE/AVX, and — being Tier 2 — ships `core`/`alloc` precompiled, so no
+  `-Z build-std` is needed either. See "Deviation from the spec" in
+  [docs/plans/milestone-2-kernel-handoff.md](plans/milestone-2-kernel-handoff.md)
+  for why this replaced the custom-target-JSON approach originally
+  envisioned below.
 - `cargo xtask` crate for build/run orchestration (builds both crates,
   assembles a FAT/GPT disk image with the ESP layout, invokes QEMU) — kept as
   ordinary Rust rather than shell scripts.
@@ -144,6 +150,8 @@ These map directly to the implementation plan phases:
 - Hand-rolled bump/free-list heap allocator vs. pulling in
   `linked_list_allocator`: leaning hand-rolled for resume value, final call
   can be made during milestone 5 without affecting earlier milestones.
-- Exact custom target JSON contents will be worked out at milestone 1 against
-  whatever current nightly requires (these flags shift across Rust
-  versions).
+- ~~Exact custom target JSON contents will be worked out at milestone 1
+  against whatever current nightly requires (these flags shift across Rust
+  versions).~~ Resolved during milestone 2: no custom target JSON exists;
+  the kernel builds against the built-in `x86_64-unknown-none` target
+  instead (see the Toolchain section above).

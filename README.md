@@ -55,9 +55,10 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --defaul
 ```
 
 `rust-toolchain.toml` in this repo pins the exact nightly and automatically
-installs the `rust-src` component and the `x86_64-unknown-uefi` target the
-first time you run `cargo` here — no separate `rustup component add` /
-`rustup target add` steps needed.
+installs the `rust-src` component and both targets this workspace needs —
+`x86_64-unknown-uefi` for the bootloader and `x86_64-unknown-none` for the
+kernel — the first time you run `cargo` here. No separate `rustup component
+add` / `rustup target add` steps needed.
 
 ## Build & run
 
@@ -67,5 +68,15 @@ cd Rust_BL
 cargo xtask run
 ```
 
-This builds the bootloader, stages an EFI System Partition directory, and
-boots it in QEMU under OVMF firmware.
+This builds the bootloader and the kernel, stages an EFI System Partition
+directory (the bootloader's `.efi` under `EFI/BOOT/`, plus `kernel.elf` at
+the ESP root), and boots it in QEMU under OVMF firmware. The bootloader
+loads and hands off to the kernel, which paints the framebuffer blue and
+reports success itself. A normal run keeps the QEMU display off
+(`-display none`) so the kernel's blue screen isn't visible — the pass/fail
+signal comes from the QEMU exit code and the serial log, not the display.
+Expected output ends with:
+
+```
+PASS: bootloader exited with expected code 33
+```

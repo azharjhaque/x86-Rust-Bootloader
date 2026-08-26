@@ -21,7 +21,7 @@ fn main() -> Status {
         qemu_exit::exit(qemu_exit::QemuExitCode::Failed);
     }
 
-    log::info!("Rust_BL bootloader: milestone 1 toolchain smoke test");
+    log::info!("Rust_BL bootloader starting");
 
     let kernel_name = cstr16!("kernel.elf");
     let kernel_image = match file::read_file(kernel_name) {
@@ -69,7 +69,7 @@ fn main() -> Status {
         framebuffer.stride,
         framebuffer.addr,
         framebuffer.size,
-        framebuffer.pixel_format
+        framebuffer.pixel_format()
     );
 
     let (regions_ptr, regions_capacity) =

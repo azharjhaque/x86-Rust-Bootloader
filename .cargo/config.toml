@@ -2,4 +2,16 @@
 xtask = "run --package xtask --"
 
 [target.x86_64-unknown-none]
+# x86_64-unknown-none defaults to a position-independent (PIE) executable,
+# but bootloader/src/elf.rs's hand-written loader only accepts ET_EXEC (see
+# elf.rs's NotExecutable check) — it does not implement relocation
+# processing. `relocation-model=static` is what makes the linker produce
+# ET_EXEC instead of ET_DYN.
+#
+# Warning for contributors: setting a `RUSTFLAGS` environment variable
+# REPLACES this target-scoped `rustflags` entirely rather than merging with
+# it — Cargo does not combine the two. Anyone building with `RUSTFLAGS` set
+# silently gets a PIE kernel back, which then fails far away from here with
+# a confusing `failed to load kernel ELF: NotExecutable` instead of a
+# config-related error.
 rustflags = ["-C", "relocation-model=static"]

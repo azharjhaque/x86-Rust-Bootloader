@@ -125,6 +125,25 @@ pub enum PixelFormatKind {
     Bgr = 1,
 }
 
+impl PixelFormatKind {
+    /// Checked conversion from the raw `u32` stored in [`FrameBufferInfo`].
+    ///
+    /// `FrameBufferInfo` stores the pixel format as a plain `u32` rather
+    /// than this enum precisely so that reading it can never itself be
+    /// undefined behavior: forming a `&PixelFormatKind` reference over a
+    /// value the enum has no variant for is UB the instant the reference
+    /// exists, before any code even gets to check it. Going through
+    /// `u32` and this fallible conversion keeps that check in ordinary,
+    /// safe code.
+    pub const fn from_u32(value: u32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Rgb),
+            1 => Some(Self::Bgr),
+            _ => None,
+        }
+    }
+}
+
 /// Everything the kernel needs to draw to the screen.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -139,7 +158,11 @@ pub struct FrameBufferInfo {
     /// `width`, to step between rows.
     pub stride: u32,
     pub bytes_per_pixel: u32,
-    pub pixel_format: PixelFormatKind,
+    /// Raw [`PixelFormatKind`] discriminant. Stored as `u32`, not the enum
+    /// itself, so that a corrupted or mismatched-version value can never
+    /// produce an invalid enum discriminant in memory — see
+    /// [`PixelFormatKind::from_u32`] and [`Self::pixel_format`].
+    pub pixel_format_raw: u32,
     _pad: u32,
 }
 
@@ -160,9 +183,16 @@ impl FrameBufferInfo {
             height,
             stride,
             bytes_per_pixel,
-            pixel_format,
+            pixel_format_raw: pixel_format as u32,
             _pad: 0,
         }
+    }
+
+    /// The pixel format, or `None` if `pixel_format_raw` is not a value
+    /// [`PixelFormatKind`] defines. [`BootInfo::is_valid`] checks this is
+    /// `Some` before the struct is trusted at all.
+    pub const fn pixel_format(&self) -> Option<PixelFormatKind> {
+        PixelFormatKind::from_u32(self.pixel_format_raw)
     }
 }
 
@@ -230,9 +260,14 @@ impl BootInfo {
     }
 
     /// True if this struct came from a bootloader built against a
-    /// compatible version of this crate.
+    /// compatible version of this crate, and its framebuffer's pixel
+    /// format is one this crate defines. The kernel must not read
+    /// `framebuffer.pixel_format()` — or anything else in this struct —
+    /// unless this returns `true`.
     pub const fn is_valid(&self) -> bool {
-        self.magic == BOOT_INFO_MAGIC && self.version == BOOT_INFO_VERSION
+        self.magic == BOOT_INFO_MAGIC
+            && self.version == BOOT_INFO_VERSION
+            && self.framebuffer.pixel_format().is_some()
     }
 
     /// # Safety
@@ -247,6 +282,17 @@ impl BootInfo {
         }
     }
 }
+
+// This crate's entire job is a fixed, hand-agreed binary layout shared by
+// two separately compiled binaries. An accidental field reorder, an added
+// field, or a size change on either side of that boundary would not be a
+// compile error by default — it would surface as a mysterious runtime
+// fault (or worse, silently wrong pixels/addresses) well after the point
+// where either binary could still report anything. These assertions turn
+// that class of mistake into a build failure instead.
+const _: () = assert!(size_of::<BootInfo>() == 88);
+const _: () = assert!(size_of::<FrameBufferInfo>() == 40);
+const _: () = assert!(size_of::<MemoryRegion>() == 24);
 ```
 
 - [ ] **Step 3: Create the `kernel` crate manifest**
@@ -689,6 +735,8 @@ pub enum ElfError {
     NoLoadableSegments,
     /// UEFI refused to give us the pages the segment asked for.
     AllocationFailed,
+    /// The entry point does not fall inside any loaded segment.
+    EntryOutOfRange,
 }
 
 /// Where a loaded kernel ended up in physical memory.
@@ -847,6 +895,19 @@ pub fn load_kernel(image: &[u8]) -> Result<LoadedKernel, ElfError> {
         return Err(ElfError::NoLoadableSegments);
     }
 
+    // A corrupted e_entry passes every other check and only fails after
+    // ExitBootServices, where a bad jump is an un-diagnosable triple fault.
+    // Catch it here, while we can still report an error.
+    if entry < lowest || entry >= highest {
+        return Err(ElfError::EntryOutOfRange);
+    }
+
+    // `highest` is the end of the last segment's *used* bytes, not the end
+    // of the last page the loader actually claimed from
+    // `allocate_pages`/`load_segment`. Round up so `size` reports the true
+    // span of pages the kernel image occupies.
+    let highest = align_up(highest);
+
     Ok(LoadedKernel {
         entry,
         base: lowest,
@@ -856,6 +917,13 @@ pub fn load_kernel(image: &[u8]) -> Result<LoadedKernel, ElfError> {
 
 fn align_down(value: u64) -> u64 {
     value & !(PAGE_SIZE - 1)
+}
+
+/// Round `value` up to the next page boundary. `value` must be small
+/// enough that the rounding cannot overflow `u64` — true for anything
+/// this loader deals with (physical addresses well below `u64::MAX`).
+fn align_up(value: u64) -> u64 {
+    (value + (PAGE_SIZE - 1)) & !(PAGE_SIZE - 1)
 }
 
 /// Allocate the pages one segment needs and copy it into place.
@@ -886,6 +954,13 @@ fn load_segment(image: &[u8], segment: &LoadSegment) -> Result<(), ElfError> {
     // `AllocateType::Address` demands these exact pages. If UEFI has
     // already put something there, this fails rather than silently
     // loading the kernel somewhere it was not linked for.
+    //
+    // NOTE: each PT_LOAD segment's pages are claimed independently, so two
+    // segments whose page-aligned ranges overlap will fail here with
+    // AllocationFailed rather than sharing the page. kernel.ld's ALIGN(4K)
+    // per section keeps them apart, and kernel/build.rs passes `-z norelro`
+    // for the same reason — RELRO would otherwise carve a non-page-aligned
+    // .got segment onto .rodata's page.
     boot::allocate_pages(
         AllocateType::Address(page_start),
         MemoryType::LOADER_DATA,
@@ -1253,7 +1328,10 @@ pub fn allocate_kernel_stack() -> Result<u64, Status> {
 /// `ExitBootServices`, `regions_ptr` must have room for
 /// `regions_capacity` entries, `entry` must be the kernel's entry point,
 /// and `stack_top` must be a valid stack. Nothing may hold a
-/// boot-services reference at this point.
+/// boot-services reference at this point. The kernel is handed control
+/// with interrupts disabled (see the `cli` below) and must only `sti`
+/// after it has installed its own IDT — `IDTR` still points at firmware
+/// memory we are about to hand back to the allocator at this point.
 pub unsafe fn exit_and_jump(
     boot_info_ptr: *mut BootInfo,
     regions_ptr: *mut MemoryRegion,
@@ -1293,6 +1371,15 @@ pub unsafe fn exit_and_jump(
 
     unsafe {
         asm!(
+            // `ExitBootServices` disabled the firmware's timer event, but
+            // did nothing to `IF` or `IDTR`: without this, the kernel would
+            // start with interrupts enabled while `IDTR` still points at
+            // firmware memory we are about to let the allocator reuse. Any
+            // interrupt before the kernel installs its own IDT would read a
+            // descriptor out of memory that may no longer hold one. Disable
+            // interrupts first, before anything else, so there is no window
+            // where that can happen.
+            "cli",
             "mov rsp, {stack}",
             // Clear the frame pointer so a backtrace walker stops here
             // rather than wandering into UEFI's dead stack frames.
@@ -1398,17 +1485,38 @@ pub extern "sysv64" fn _start(boot_info: *const BootInfo) -> ! {
 /// that we reached the kernel and the framebuffer description is right.
 fn fill_screen(info: &BootInfo, red: u8, green: u8, blue: u8) {
     let fb = &info.framebuffer;
-    let pixel = match fb.pixel_format {
+
+    // `info.is_valid()` already guarantees `fb.pixel_format()` is `Some`,
+    // so this `unwrap_or` never actually falls back in practice. It is
+    // written this way instead of `unwrap()` so a future change that
+    // calls `fill_screen` without going through `is_valid()` first fails
+    // safe (falls back to `Bgr`) rather than panicking with no logger and
+    // no fault handler to report it.
+    let pixel_format = fb.pixel_format().unwrap_or(PixelFormatKind::Bgr);
+    let pixel = match pixel_format {
         PixelFormatKind::Rgb => [red, green, blue, 0],
         PixelFormatKind::Bgr => [blue, green, red, 0],
     };
 
+    // Both pixel formats this crate understands are 32 bits per pixel, so
+    // `pixel` (4 bytes) always covers a whole pixel. Clamp the copy length
+    // to the buffer's own size so a corrupted `bytes_per_pixel` cannot
+    // turn this into an out-of-bounds read of `pixel` itself.
+    let bytes_per_pixel = (fb.bytes_per_pixel as usize).min(pixel.len());
+
     let base = fb.addr as *mut u8;
+    let fb_size = fb.size as usize;
     for y in 0..fb.height as usize {
         for x in 0..fb.width as usize {
-            let offset = (y * fb.stride as usize + x) * fb.bytes_per_pixel as usize;
+            let offset = (y * fb.stride as usize + x) * bytes_per_pixel;
+            // Never write at or beyond the framebuffer's reported size.
+            // This runs with no fault handler and no logger, so an
+            // out-of-bounds write here would otherwise be invisible.
+            if offset + bytes_per_pixel > fb_size {
+                continue;
+            }
             unsafe {
-                core::ptr::copy_nonoverlapping(pixel.as_ptr(), base.add(offset), 4);
+                core::ptr::copy_nonoverlapping(pixel.as_ptr(), base.add(offset), bytes_per_pixel);
             }
         }
     }

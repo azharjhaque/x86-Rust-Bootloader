@@ -28,6 +28,25 @@ pub enum PixelFormatKind {
     Bgr = 1,
 }
 
+impl PixelFormatKind {
+    /// Checked conversion from the raw `u32` stored in [`FrameBufferInfo`].
+    ///
+    /// `FrameBufferInfo` stores the pixel format as a plain `u32` rather
+    /// than this enum precisely so that reading it can never itself be
+    /// undefined behavior: forming a `&PixelFormatKind` reference over a
+    /// value the enum has no variant for is UB the instant the reference
+    /// exists, before any code even gets to check it. Going through
+    /// `u32` and this fallible conversion keeps that check in ordinary,
+    /// safe code.
+    pub const fn from_u32(value: u32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Rgb),
+            1 => Some(Self::Bgr),
+            _ => None,
+        }
+    }
+}
+
 /// Everything the kernel needs to draw to the screen.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -42,7 +61,11 @@ pub struct FrameBufferInfo {
     /// `width`, to step between rows.
     pub stride: u32,
     pub bytes_per_pixel: u32,
-    pub pixel_format: PixelFormatKind,
+    /// Raw [`PixelFormatKind`] discriminant. Stored as `u32`, not the enum
+    /// itself, so that a corrupted or mismatched-version value can never
+    /// produce an invalid enum discriminant in memory — see
+    /// [`PixelFormatKind::from_u32`] and [`Self::pixel_format`].
+    pub pixel_format_raw: u32,
     _pad: u32,
 }
 
@@ -63,9 +86,16 @@ impl FrameBufferInfo {
             height,
             stride,
             bytes_per_pixel,
-            pixel_format,
+            pixel_format_raw: pixel_format as u32,
             _pad: 0,
         }
+    }
+
+    /// The pixel format, or `None` if `pixel_format_raw` is not a value
+    /// [`PixelFormatKind`] defines. [`BootInfo::is_valid`] checks this is
+    /// `Some` before the struct is trusted at all.
+    pub const fn pixel_format(&self) -> Option<PixelFormatKind> {
+        PixelFormatKind::from_u32(self.pixel_format_raw)
     }
 }
 
@@ -133,9 +163,14 @@ impl BootInfo {
     }
 
     /// True if this struct came from a bootloader built against a
-    /// compatible version of this crate.
+    /// compatible version of this crate, and its framebuffer's pixel
+    /// format is one this crate defines. The kernel must not read
+    /// `framebuffer.pixel_format()` — or anything else in this struct —
+    /// unless this returns `true`.
     pub const fn is_valid(&self) -> bool {
-        self.magic == BOOT_INFO_MAGIC && self.version == BOOT_INFO_VERSION
+        self.magic == BOOT_INFO_MAGIC
+            && self.version == BOOT_INFO_VERSION
+            && self.framebuffer.pixel_format().is_some()
     }
 
     /// # Safety
@@ -150,3 +185,14 @@ impl BootInfo {
         }
     }
 }
+
+// This crate's entire job is a fixed, hand-agreed binary layout shared by
+// two separately compiled binaries. An accidental field reorder, an added
+// field, or a size change on either side of that boundary would not be a
+// compile error by default — it would surface as a mysterious runtime
+// fault (or worse, silently wrong pixels/addresses) well after the point
+// where either binary could still report anything. These assertions turn
+// that class of mistake into a build failure instead.
+const _: () = assert!(size_of::<BootInfo>() == 88);
+const _: () = assert!(size_of::<FrameBufferInfo>() == 40);
+const _: () = assert!(size_of::<MemoryRegion>() == 24);

@@ -45,7 +45,10 @@ pub fn allocate_kernel_stack() -> Result<u64, Status> {
 /// `ExitBootServices`, `regions_ptr` must have room for
 /// `regions_capacity` entries, `entry` must be the kernel's entry point,
 /// and `stack_top` must be a valid stack. Nothing may hold a
-/// boot-services reference at this point.
+/// boot-services reference at this point. The kernel is handed control
+/// with interrupts disabled (see the `cli` below) and must only `sti`
+/// after it has installed its own IDT — `IDTR` still points at firmware
+/// memory we are about to hand back to the allocator at this point.
 pub unsafe fn exit_and_jump(
     boot_info_ptr: *mut BootInfo,
     regions_ptr: *mut MemoryRegion,
@@ -85,6 +88,15 @@ pub unsafe fn exit_and_jump(
 
     unsafe {
         asm!(
+            // `ExitBootServices` disabled the firmware's timer event, but
+            // did nothing to `IF` or `IDTR`: without this, the kernel would
+            // start with interrupts enabled while `IDTR` still points at
+            // firmware memory we are about to let the allocator reuse. Any
+            // interrupt before the kernel installs its own IDT would read a
+            // descriptor out of memory that may no longer hold one. Disable
+            // interrupts first, before anything else, so there is no window
+            // where that can happen.
+            "cli",
             "mov rsp, {stack}",
             // Clear the frame pointer so a backtrace walker stops here
             // rather than wandering into UEFI's dead stack frames.
