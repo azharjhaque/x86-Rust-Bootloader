@@ -12,7 +12,7 @@
 use core::arch::asm;
 use core::mem::size_of;
 
-use crate::gdt::KERNEL_CODE_SELECTOR;
+use crate::gdt::{DescriptorTablePointer, KERNEL_CODE_SELECTOR};
 
 /// The stack frame the CPU pushes before entering a handler.
 ///
@@ -73,8 +73,12 @@ impl Entry {
             // means "no IST". A bad index here would select an
             // uninitialized TSS slot (RSP = 0) and fault while pushing the
             // exception frame — a triple fault with nothing to show for it.
+            // This is a real `assert!`, not `debug_assert!`: it runs once
+            // at init time, costs nothing, and a release build silently
+            // wrapping index 7 to "no IST" is exactly the failure mode the
+            // comment above warns about.
             Some(index) => {
-                debug_assert!(index < 7, "IST index out of range");
+                assert!(index < 7, "IST index out of range");
                 (index + 1) & 0b111
             }
             None => 0,
@@ -104,17 +108,11 @@ const _: () = assert!(size_of::<Idt>() == 4096);
 
 static mut IDT: Idt = Idt::new();
 
-#[repr(C, packed(2))]
-struct DescriptorTablePointer {
-    limit: u16,
-    base: u64,
-}
-
 /// Install a handler that runs on the current stack.
 ///
 /// # Safety
 /// `handler` must be a valid `extern "x86-interrupt"` function for `vector`.
-pub unsafe fn set_handler(vector: u8, handler: u64) {
+unsafe fn set_handler(vector: u8, handler: u64) {
     unsafe { IDT.entries[vector as usize].set(handler, None) }
 }
 
@@ -123,7 +121,7 @@ pub unsafe fn set_handler(vector: u8, handler: u64) {
 /// # Safety
 /// `handler` must be a valid `extern "x86-interrupt"` function for
 /// `vector`, and `ist_index` must name a slot the TSS has filled in.
-pub unsafe fn set_handler_with_ist(vector: u8, handler: u64, ist_index: u8) {
+unsafe fn set_handler_with_ist(vector: u8, handler: u64, ist_index: u8) {
     unsafe { IDT.entries[vector as usize].set(handler, Some(ist_index)) }
 }
 
@@ -131,7 +129,7 @@ pub unsafe fn set_handler_with_ist(vector: u8, handler: u64, ist_index: u8) {
 ///
 /// # Safety
 /// Every entry marked present must point at a valid handler.
-pub unsafe fn load() {
+unsafe fn load() {
     unsafe {
         let pointer = DescriptorTablePointer {
             limit: (size_of::<Idt>() - 1) as u16,
@@ -145,7 +143,7 @@ pub unsafe fn load() {
 /// for breakpoints. It is a *trap*: execution resumes at the instruction
 /// after the `int3`, which makes it the safest possible way to prove the
 /// IDT works.
-pub extern "x86-interrupt" fn breakpoint_handler(frame: InterruptStackFrame) {
+extern "x86-interrupt" fn breakpoint_handler(frame: InterruptStackFrame) {
     crate::kprintln!(
         "EXCEPTION: breakpoint at {:#x} (execution will resume)",
         frame.instruction_pointer
@@ -163,7 +161,16 @@ pub extern "x86-interrupt" fn breakpoint_handler(frame: InterruptStackFrame) {
 /// failure to deliver the double fault, which the CPU responds to by
 /// resetting the machine. A triple fault gives no diagnostics at all —
 /// under QEMU's `-no-reboot` it is simply a dead VM.
-pub extern "x86-interrupt" fn double_fault_handler(
+///
+/// This handler is reached by *any* unhandled exception, not just the one
+/// `main.rs` deliberately provokes with `ud2`. It only reports success when
+/// both `crate::expecting_double_fault()` is true (set immediately before
+/// the deliberate `ud2`) and the IST switch is confirmed to have happened;
+/// any other double fault — a real bug escalating through a missing
+/// handler, or a broken IST setup — reports failure instead. Without this
+/// check the handler would report success unconditionally and the harness
+/// could never fail.
+extern "x86-interrupt" fn double_fault_handler(
     frame: InterruptStackFrame,
     _error_code: u64,
 ) -> ! {
@@ -182,12 +189,20 @@ pub extern "x86-interrupt" fn double_fault_handler(
     crate::kprintln!("  interrupted stack:    {:#x}", frame.stack_pointer);
     crate::kprintln!("  handler stack:        {:#x}", handler_rsp);
     crate::kprintln!("  fault stack spans:    {fault_lo:#x}..{fault_hi:#x}");
-    if handler_rsp >= fault_lo && handler_rsp < fault_hi {
+    let on_ist = handler_rsp >= fault_lo && handler_rsp < fault_hi;
+    if on_ist {
         crate::kprintln!("  handler is running on the IST stack — the machine did not reset");
     } else {
         crate::kprintln!("  WARNING: handler is NOT on the IST stack; the switch did not happen");
     }
 
+    if !crate::expecting_double_fault() {
+        crate::kprintln!("  this double fault was NOT expected — some earlier vector is unhandled");
+        crate::qemu_exit::exit(crate::qemu_exit::QemuExitCode::Failed);
+    }
+    if !on_ist {
+        crate::qemu_exit::exit(crate::qemu_exit::QemuExitCode::Failed);
+    }
     crate::qemu_exit::exit(crate::qemu_exit::QemuExitCode::Success)
 }
 

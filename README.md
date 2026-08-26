@@ -10,9 +10,9 @@ rather than delegated to an existing library, milestone by milestone.
 
 ✅ Milestone 3 of 6 complete and verified: the kernel now reports over its
 own COM1 serial driver, builds and loads its own GDT and TSS, installs a
-256-entry IDT, handles a breakpoint exception, and catches a double fault
-on a dedicated IST stack instead of letting the CPU triple-fault and reset
-the machine.
+256-entry IDT, handles a breakpoint exception, and deliberately provokes and
+catches a double fault on a dedicated IST stack instead of letting the CPU
+triple-fault and reset the machine.
 
 See [docs/design.md](docs/design.md) for the full design, and
 [docs/plans/](docs/plans/) for implementation plans per milestone.
@@ -77,12 +77,45 @@ reports success itself. A normal run keeps the QEMU display off
 signal comes from the QEMU exit code and the serial log, not the display.
 Once the kernel has taken over from the UEFI console, it reports its own
 progress on the same serial console via a COM1 driver, so its output now
-appears right after the bootloader's handing off to kernel line. Expected
-output ends with:
+appears right after the bootloader's handing off to kernel line.
+
+The kernel's own trace — everything from here on is the kernel, not the
+bootloader — looks like this:
 
 ```
+=== Rust_BL kernel ===
+framebuffer: 1280x800 stride=1280 @ 0x80000000
+kernel image: base=0x200000 size=0xd000
+GDT + TSS loaded (code selector 0x8)
+double-fault IST index: 0
+IDT loaded
+EXCEPTION: breakpoint at 0x200797 (execution will resume)
+resumed after breakpoint
+framebuffer painted
+kernel reached the end of milestone 3 setup
+
+about to raise #UD with no vector-6 handler installed;
+the CPU should escalate it to a double fault...
+EXCEPTION: double fault
+  faulting instruction: 0x200928
+  interrupted stack:    0xdfa7e60
+  handler stack:        0x20be98
+  fault stack spans:    0x208010..0x20c010
+  handler is running on the IST stack — the machine did not reset
 PASS: bootloader exited with expected code 33
 ```
+
+The `EXCEPTION: double fault` near the end is expected, not a crash: the
+kernel deliberately executes `ud2` (an invalid opcode) with no handler
+registered for vector 6, so the CPU escalates the fault it can't deliver
+into a double fault (vector 8). That double fault is caught by a handler
+running on its own dedicated IST stack — proven above by the handler stack
+address falling inside the reported fault-stack range — rather than the
+alternative, which is the CPU resetting the machine outright (a triple
+fault, invisible to this log). The `PASS` line only appears because the
+double-fault handler confirms both that this was the fault it expected and
+that it ran on the IST stack; any other unhandled exception, or a broken
+IST switch, reports failure instead.
 
 ## Testing the failure path
 

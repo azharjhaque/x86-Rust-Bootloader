@@ -41,8 +41,13 @@ pub unsafe fn init() {
 
         // Set DLAB so the first two registers become the baud divisor.
         outb(COM1 + LINE_CONTROL, 0x80);
-        // Divisor 3 = 115200 / 3 = 38400 baud.
+        // Divisor 3 = 115200 / 3 = 38400 baud. Low byte.
         outb(COM1 + DATA, 0x03);
+        // Divisor high byte. With DLAB still set this is *not* the IER
+        // write above repeated — it is register 1 reinterpreted as the top
+        // half of the same 16-bit divisor written to register 0 just
+        // above. Both bytes must land before DLAB is cleared below, or the
+        // UART is left with only half a divisor programmed.
         outb(COM1 + INTERRUPT_ENABLE, 0x00);
 
         // Clear DLAB and set 8N1 in the same write.
@@ -58,6 +63,16 @@ pub unsafe fn init() {
 }
 
 /// Write one byte, spinning until the UART can accept it.
+///
+/// A safe wrapper, even though `port.rs`'s module doc says on purpose that
+/// there is no safe wrapper there — the justification lives here instead of
+/// at each call site because there is exactly one call site for each port:
+/// `COM1` is fixed by PC convention (see [`COM1`]), reading `LINE_STATUS`
+/// has no side effects on a 16550, and writing `DATA` (the transmit holding
+/// register) only queues a byte for transmission — it cannot reconfigure
+/// the device the way writes to `LINE_CONTROL` or `MODEM_CONTROL` can. Both
+/// preconditions depend on [`init`] having already run (DLAB clear, FIFOs
+/// enabled): this must not be called before it.
 fn write_byte(byte: u8) {
     // Busy-wait for the transmit holding register. At 38400 baud this is
     // microseconds; a kernel with no scheduler has nothing better to do.

@@ -120,11 +120,19 @@ tests on). Verification is:
 - **Boot smoke test**: xtask launches QEMU with the built image; a successful
   boot to the kernel's `hlt` loop without a triple fault is the base
   pass/fail signal.
-- **Milestone markers**: the kernel/bootloader write a milestone marker
+- **Milestone markers**: ~~the kernel/bootloader write a milestone marker
   (e.g., "GDT loaded", "IDT loaded", "timer interrupt received") to the
   QEMU `isa-debug-exit` device with a distinct exit code, so `xtask` can
   script pass/fail checks per milestone instead of relying on visual
-  inspection alone.
+  inspection alone.~~ Reversed during milestone 3: `QemuExitCode` stays a
+  two-value terminal verdict (`Success` / `Failed`, exit codes 33 / 35).
+  Per-step progress ("GDT + TSS loaded", "IDT loaded", the double-fault
+  report, ...) goes to the serial console instead, via the UART driver
+  milestone 3 added — a distinct `isa-debug-exit` code per milestone would
+  need `xtask` to track which milestone is running for no real benefit once
+  the trace is human- and `grep`-readable on serial, and some of what needs
+  reporting (e.g. the double-fault handler's two stack addresses) doesn't
+  fit in a single exit-code byte anyway.
 - **Visual verification**: framebuffer text output and keyboard echo are
   confirmed by eye in the QEMU window for milestones where that's the
   natural check (text rendering, keypress echo).

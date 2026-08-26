@@ -87,17 +87,30 @@ const _: () = assert!(size_of::<TaskStateSegment>() == 104);
 
 static mut TSS: TaskStateSegment = TaskStateSegment::new();
 
-/// The GDT itself: null, kernel code, kernel data, then the TSS descriptor,
-/// which is 16 bytes and therefore occupies two entries.
-static mut GDT: [u64; 5] = [0; 5];
+/// Number of entries in [`GDT`]: null, kernel code, kernel data, then the
+/// TSS descriptor, which is 16 bytes and therefore occupies two entries.
+/// Named so the `lgdt` limit below can be derived from it instead of
+/// restating `[u64; 5]` independently of the array's own declaration.
+const GDT_ENTRIES: usize = 5;
 
-/// Argument to `lgdt`. `packed(2)` so the `u64` base sits immediately after
-/// the `u16` limit with no padding, which is what the instruction expects.
+/// The GDT itself.
+static mut GDT: [u64; GDT_ENTRIES] = [0; GDT_ENTRIES];
+
+/// Argument to `lgdt`/`lidt`. `packed(2)` so the `u64` base sits
+/// immediately after the `u16` limit with no padding, which is what the
+/// instructions expect. Shared between this module and `idt.rs` — the
+/// layout is identical for both tables, so there is exactly one
+/// declaration rather than two copies that could drift apart.
 #[repr(C, packed(2))]
-struct DescriptorTablePointer {
-    limit: u16,
-    base: u64,
+pub(crate) struct DescriptorTablePointer {
+    pub(crate) limit: u16,
+    pub(crate) base: u64,
 }
+
+// 2-byte limit + 8-byte base, packed with no padding between them — this is
+// what `lgdt`/`lidt` read directly off the stack, so a stray padding byte
+// here would silently corrupt whichever table is loaded next.
+const _: () = assert!(size_of::<DescriptorTablePointer>() == 10);
 
 // Descriptor bit positions that still carry meaning in long mode.
 const WRITABLE: u64 = 1 << 41;
@@ -117,9 +130,14 @@ const TSS_SELECTOR: u16 = 3 * 8;
 /// Build the GDT and TSS, then load them.
 ///
 /// # Safety
-/// Must be called exactly once, with interrupts disabled. Reloading the
-/// code segment mid-flight means a mistake here does not fault cleanly —
-/// it triple-faults.
+/// Must be called exactly once, with interrupts disabled — that
+/// precondition is established outside this crate entirely: the
+/// bootloader's handoff stub (`bootloader/src/handoff.rs`) issues `cli`
+/// before jumping to the kernel entry point, and nothing in the kernel
+/// re-enables interrupts before this call. If that ever changes, this
+/// function's caller must `cli` first. Reloading the code segment
+/// mid-flight means a mistake here does not fault cleanly — it
+/// triple-faults.
 pub unsafe fn init() {
     unsafe {
         // Point IST[0] at the top of the fault stack. Stacks grow down, so
@@ -145,7 +163,11 @@ pub unsafe fn init() {
         GDT[4] = tss_base >> 32;
 
         let pointer = DescriptorTablePointer {
-            limit: (size_of::<[u64; 5]>() - 1) as u16,
+            // Derived from `GDT_ENTRIES`, the same constant that sizes the
+            // array, rather than restating `[u64; 5]` here — so growing the
+            // table (e.g. a future LDT or extra TSS entry) can't silently
+            // leave the limit describing the old, shorter size.
+            limit: (GDT_ENTRIES * size_of::<u64>() - 1) as u16,
             base: &raw const GDT as u64,
         };
 
@@ -175,6 +197,15 @@ pub unsafe fn init() {
             in(reg) KERNEL_DATA_SELECTOR,
             options(nostack, preserves_flags),
         );
+
+        // FS and GS are deliberately left untouched here: nothing in this
+        // milestone uses them, so they still hold whatever selectors UEFI's
+        // firmware GDT set up. That firmware GDT is not reloaded (its
+        // memory is still ours to reuse, and CS/DS/ES/SS above no longer
+        // reference it), so FS/GS are technically pointing at descriptors
+        // that no longer exist. This becomes a real bug the day a per-CPU
+        // GS-relative design shows up (Milestone 4+ territory) — at that
+        // point FS/GS need their own selectors here, not before.
 
         // Load the task register, which is what actually makes the IST
         // usable.
