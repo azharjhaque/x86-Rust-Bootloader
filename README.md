@@ -8,9 +8,11 @@ rather than delegated to an existing library, milestone by milestone.
 
 ## Status
 
-✅ Milestone 1 of 6 complete and verified: `cargo xtask run` builds the
-bootloader, boots it in QEMU/OVMF, and confirms a clean exit
-(`PASS: bootloader exited with expected code 33`).
+✅ Milestone 2 of 6 complete and verified: the bootloader loads a
+separate kernel ELF from the EFI System Partition with a hand-written
+ELF64 loader, collects the UEFI memory map and a GOP framebuffer, exits
+boot services, and jumps to the kernel — which paints the framebuffer and
+reports success itself.
 
 See [docs/design.md](docs/design.md) for the full design, and
 [docs/plans/](docs/plans/) for implementation plans per milestone.
@@ -18,7 +20,7 @@ See [docs/design.md](docs/design.md) for the full design, and
 ## Roadmap
 
 - [x] 1. Toolchain bootstrap — empty UEFI app boots in QEMU/OVMF
-- [ ] 2. Bootloader: ELF loader, memory map, framebuffer, handoff to kernel
+- [x] 2. Bootloader: ELF loader, memory map, framebuffer, handoff to kernel
 - [ ] 3. Kernel: GDT, IDT, double-fault handler
 - [ ] 4. Kernel: PIT timer + PS/2 keyboard interrupts, framebuffer text
 - [ ] 5. Kernel: physical frame allocator + heap allocator

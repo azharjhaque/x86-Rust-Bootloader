@@ -9,12 +9,6 @@ const ISA_DEBUG_EXIT_PORT: u16 = 0xf4;
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QemuExitCode {
-    // Never constructed by the bootloader itself: after the handoff, only
-    // the kernel's copy of this enum ever signals `Success`. Kept here for
-    // parity with the kernel's copy (see `kernel/src/qemu_exit.rs`) rather
-    // than dropped, since this enum documents the full `isa-debug-exit`
-    // contract, not just the half the bootloader still uses.
-    #[allow(dead_code)]
     Success = 0x10,
     Failed = 0x11,
 }

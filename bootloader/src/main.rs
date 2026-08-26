@@ -3,8 +3,7 @@
 
 extern crate alloc;
 
-use core::time::Duration;
-
+use boot_info::BootInfo;
 use uefi::boot;
 use uefi::cstr16;
 use uefi::prelude::*;
@@ -12,6 +11,7 @@ use uefi::prelude::*;
 mod elf;
 mod file;
 mod graphics;
+mod handoff;
 mod memory;
 mod qemu_exit;
 
@@ -67,7 +67,7 @@ fn main() -> Status {
         framebuffer.pixel_format
     );
 
-    let (_regions_ptr, regions_capacity) =
+    let (regions_ptr, regions_capacity) =
         match memory::allocate_region_array(memory::REGION_CAPACITY) {
             Ok(pair) => pair,
             Err(status) => {
@@ -78,7 +78,47 @@ fn main() -> Status {
 
     log::info!("memory-region array: capacity={regions_capacity}");
 
-    boot::stall(Duration::from_secs(2)); // so the log line is visible on screen
+    let stack_top = match handoff::allocate_kernel_stack() {
+        Ok(top) => top,
+        Err(status) => {
+            log::error!("failed to allocate kernel stack: {status:?}");
+            qemu_exit::exit(qemu_exit::QemuExitCode::Failed);
+        }
+    };
 
-    qemu_exit::exit(qemu_exit::QemuExitCode::Success)
+    // BootInfo itself must outlive boot services, so it goes in
+    // LOADER_DATA rather than on our soon-to-be-invalid stack.
+    let boot_info_ptr = match boot::allocate_pages(
+        uefi::boot::AllocateType::AnyPages,
+        uefi::mem::memory_map::MemoryType::LOADER_DATA,
+        1,
+    ) {
+        Ok(ptr) => ptr.as_ptr().cast::<BootInfo>(),
+        Err(status) => {
+            log::error!("failed to allocate BootInfo: {status:?}");
+            qemu_exit::exit(qemu_exit::QemuExitCode::Failed);
+        }
+    };
+
+    unsafe {
+        boot_info_ptr.write(BootInfo::new(
+            framebuffer,
+            regions_ptr as u64,
+            0, // filled in after ExitBootServices, when the map is final
+            loaded.base,
+            loaded.size,
+        ));
+    }
+
+    log::info!("handing off to kernel at {:#x}", loaded.entry);
+
+    unsafe {
+        handoff::exit_and_jump(
+            boot_info_ptr,
+            regions_ptr,
+            regions_capacity,
+            loaded.entry,
+            stack_top,
+        )
+    }
 }
