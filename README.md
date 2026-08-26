@@ -80,3 +80,25 @@ Expected output ends with:
 ```
 PASS: bootloader exited with expected code 33
 ```
+
+## Testing the failure path
+
+```bash
+cargo xtask test
+```
+
+`cargo xtask run` only ever exercises the happy path, which leaves every
+validation branch in the ELF loader — magic, class, endianness, machine,
+bounds and overflow checks, entry-point range — untested. All of it could be
+deleted and `run` would still report PASS.
+
+`cargo xtask test` closes that gap: it corrupts the staged kernel's ELF magic,
+boots it, and checks that the bootloader *rejects* the image rather than
+jumping into it. The distinction matters because the loader validates before
+`ExitBootServices`: caught there it is a logged error and a clean exit, missed
+it is a triple fault with no logger left to report anything. The original
+image is restored afterward. Expected output ends with:
+
+```
+PASS: bootloader rejected the corrupted image (exit 35) instead of jumping into it
+```
