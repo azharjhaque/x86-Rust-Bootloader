@@ -181,3 +181,9 @@ pub unsafe fn init() {
         asm!("ltr {0:x}", in(reg) TSS_SELECTOR, options(nostack, preserves_flags));
     }
 }
+
+/// The address range of the double-fault stack, for diagnostics.
+pub fn fault_stack_range() -> (u64, u64) {
+    let bottom = &raw const FAULT_STACK as u64;
+    (bottom, bottom + FAULT_STACK_SIZE as u64)
+}

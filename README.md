@@ -8,11 +8,11 @@ rather than delegated to an existing library, milestone by milestone.
 
 ## Status
 
-✅ Milestone 2 of 6 complete and verified: the bootloader loads a
-separate kernel ELF from the EFI System Partition with a hand-written
-ELF64 loader, collects the UEFI memory map and a GOP framebuffer, exits
-boot services, and jumps to the kernel — which paints the framebuffer and
-reports success itself.
+✅ Milestone 3 of 6 complete and verified: the kernel now reports over its
+own COM1 serial driver, builds and loads its own GDT and TSS, installs a
+256-entry IDT, handles a breakpoint exception, and catches a double fault
+on a dedicated IST stack instead of letting the CPU triple-fault and reset
+the machine.
 
 See [docs/design.md](docs/design.md) for the full design, and
 [docs/plans/](docs/plans/) for implementation plans per milestone.
@@ -21,7 +21,7 @@ See [docs/design.md](docs/design.md) for the full design, and
 
 - [x] 1. Toolchain bootstrap — empty UEFI app boots in QEMU/OVMF
 - [x] 2. Bootloader: ELF loader, memory map, framebuffer, handoff to kernel
-- [ ] 3. Kernel: GDT, IDT, double-fault handler
+- [x] 3. Kernel: GDT, IDT, double-fault handler
 - [ ] 4. Kernel: PIT timer + PS/2 keyboard interrupts, framebuffer text
 - [ ] 5. Kernel: physical frame allocator + heap allocator
 - [ ] 6. Polish: docs, screenshots/GIF, write-up

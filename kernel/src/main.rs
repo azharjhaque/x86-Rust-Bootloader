@@ -56,8 +56,18 @@ pub extern "sysv64" fn _start(boot_info: *const BootInfo) -> ! {
     fill_screen(info, 0x00, 0x33, 0x99);
     kprintln!("framebuffer painted");
     kprintln!("kernel reached the end of milestone 3 setup");
+    kprintln!();
+    kprintln!("about to raise #UD with no vector-6 handler installed;");
+    kprintln!("the CPU should escalate it to a double fault...");
 
-    qemu_exit::exit(qemu_exit::QemuExitCode::Success)
+    // `ud2` is architecturally guaranteed to raise an invalid-opcode
+    // exception (#UD, vector 6). Nothing is registered for vector 6, so the
+    // CPU cannot deliver it and escalates to #DF. The double-fault handler
+    // exits, so control never returns here.
+    unsafe { core::arch::asm!("ud2", options(nomem, nostack)) };
+
+    kprintln!("FATAL: ud2 did not fault — the CPU ignored an invalid opcode");
+    qemu_exit::exit(qemu_exit::QemuExitCode::Failed)
 }
 
 /// Paint the whole framebuffer one colour — the simplest possible proof

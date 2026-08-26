@@ -123,9 +123,6 @@ pub unsafe fn set_handler(vector: u8, handler: u64) {
 /// # Safety
 /// `handler` must be a valid `extern "x86-interrupt"` function for
 /// `vector`, and `ist_index` must name a slot the TSS has filled in.
-///
-/// Unused until Task 4 registers the double-fault handler on an IST stack.
-#[allow(dead_code)]
 pub unsafe fn set_handler_with_ist(vector: u8, handler: u64, ist_index: u8) {
     unsafe { IDT.entries[vector as usize].set(handler, Some(ist_index)) }
 }
@@ -155,6 +152,30 @@ pub extern "x86-interrupt" fn breakpoint_handler(frame: InterruptStackFrame) {
     );
 }
 
+/// Vector 8, raised when the CPU fails to deliver an earlier exception —
+/// for example because that exception's IDT entry is absent.
+///
+/// It cannot return: the state that caused it has not been repaired, so
+/// `iretq` would simply fault again. The error code is architecturally
+/// always zero and exists only to keep the stack frame uniform.
+///
+/// Catching this matters because the alternative is a *triple* fault: a
+/// failure to deliver the double fault, which the CPU responds to by
+/// resetting the machine. A triple fault gives no diagnostics at all —
+/// under QEMU's `-no-reboot` it is simply a dead VM.
+pub extern "x86-interrupt" fn double_fault_handler(
+    frame: InterruptStackFrame,
+    _error_code: u64,
+) -> ! {
+    crate::kprintln!("EXCEPTION: double fault");
+    crate::kprintln!("  faulting instruction: {:#x}", frame.instruction_pointer);
+    crate::kprintln!("  stack pointer:        {:#x}", frame.stack_pointer);
+    crate::kprintln!("  (fault stack spans {:#x}..{:#x})", crate::gdt::fault_stack_range().0, crate::gdt::fault_stack_range().1);
+    crate::kprintln!("  caught on the IST stack — the machine did not reset");
+
+    crate::qemu_exit::exit(crate::qemu_exit::QemuExitCode::Success)
+}
+
 /// Install the handlers this milestone provides and load the table.
 ///
 /// # Safety
@@ -163,6 +184,11 @@ pub extern "x86-interrupt" fn breakpoint_handler(frame: InterruptStackFrame) {
 pub unsafe fn init() {
     unsafe {
         set_handler(3, breakpoint_handler as *const () as u64);
+        set_handler_with_ist(
+            8,
+            double_fault_handler as *const () as u64,
+            crate::gdt::DOUBLE_FAULT_IST_INDEX,
+        );
         load();
     }
 }
