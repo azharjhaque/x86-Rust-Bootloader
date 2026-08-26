@@ -75,7 +75,10 @@ loads and hands off to the kernel, which paints the framebuffer blue and
 reports success itself. A normal run keeps the QEMU display off
 (`-display none`) so the kernel's blue screen isn't visible — the pass/fail
 signal comes from the QEMU exit code and the serial log, not the display.
-Expected output ends with:
+Once the kernel has taken over from the UEFI console, it reports its own
+progress on the same serial console via a COM1 driver, so its output now
+appears right after the bootloader's handing off to kernel line. Expected
+output ends with:
 
 ```
 PASS: bootloader exited with expected code 33

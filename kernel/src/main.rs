@@ -3,22 +3,43 @@
 
 use boot_info::{BootInfo, PixelFormatKind};
 
+mod port;
 mod qemu_exit;
+mod serial;
 
 #[unsafe(no_mangle)]
 pub extern "sysv64" fn _start(boot_info: *const BootInfo) -> ! {
+    // Initialise serial first: from here on every failure can announce
+    // itself, including the validation failures immediately below.
+    unsafe { serial::init() };
+    kprintln!();
+    kprintln!("=== Rust_BL kernel ===");
+
     // The pointer comes from another binary, so check the contract before
     // trusting anything behind it.
     if boot_info.is_null() {
+        kprintln!("FATAL: boot_info pointer is null");
         qemu_exit::exit(qemu_exit::QemuExitCode::Failed);
     }
 
     let info = unsafe { &*boot_info };
     if !info.is_valid() {
+        kprintln!("FATAL: boot_info failed validation (magic/version/format)");
         qemu_exit::exit(qemu_exit::QemuExitCode::Failed);
     }
 
+    kprintln!(
+        "framebuffer: {}x{} stride={} @ {:#x}",
+        info.framebuffer.width,
+        info.framebuffer.height,
+        info.framebuffer.stride,
+        info.framebuffer.addr
+    );
+    kprintln!("kernel image: base={:#x} size={:#x}", info.kernel_base, info.kernel_size);
+
     fill_screen(info, 0x00, 0x33, 0x99);
+    kprintln!("framebuffer painted");
+    kprintln!("kernel reached the end of milestone 3 setup");
 
     qemu_exit::exit(qemu_exit::QemuExitCode::Success)
 }
@@ -65,6 +86,10 @@ fn fill_screen(info: &BootInfo, red: u8, green: u8, blue: u8) {
 }
 
 #[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    // The formatting machinery allocates nothing, so this is safe even
+    // here. If the UART itself is the problem this will hang in
+    // `write_byte`, which is still more informative than a silent exit.
+    kprintln!("KERNEL PANIC: {info}");
     qemu_exit::exit(qemu_exit::QemuExitCode::Failed)
 }
