@@ -9,6 +9,7 @@ use uefi::boot;
 use uefi::cstr16;
 use uefi::prelude::*;
 
+mod elf;
 mod file;
 mod qemu_exit;
 
@@ -30,6 +31,21 @@ fn main() -> Status {
     };
 
     log::info!("loaded kernel.elf: {} bytes", kernel_image.len());
+
+    let loaded = match elf::load_kernel(&kernel_image) {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            log::error!("failed to load kernel ELF: {error:?}");
+            qemu_exit::exit(qemu_exit::QemuExitCode::Failed);
+        }
+    };
+
+    log::info!(
+        "kernel loaded: entry={:#x} base={:#x} size={:#x}",
+        loaded.entry,
+        loaded.base,
+        loaded.size
+    );
 
     boot::stall(Duration::from_secs(2)); // so the log line is visible on screen
 
