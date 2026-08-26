@@ -1,9 +1,11 @@
 #![no_std]
 #![no_main]
+#![feature(abi_x86_interrupt)]
 
 use boot_info::{BootInfo, PixelFormatKind};
 
 mod gdt;
+mod idt;
 mod port;
 mod qemu_exit;
 mod serial;
@@ -41,6 +43,15 @@ pub extern "sysv64" fn _start(boot_info: *const BootInfo) -> ! {
     unsafe { gdt::init() };
     kprintln!("GDT + TSS loaded (code selector {:#x})", gdt::KERNEL_CODE_SELECTOR);
     kprintln!("double-fault IST index: {}", gdt::DOUBLE_FAULT_IST_INDEX);
+
+    unsafe { idt::init() };
+    kprintln!("IDT loaded");
+
+    // Raise a breakpoint exception on purpose. It is a trap, so the CPU
+    // resumes at the following instruction — if the next line prints, the
+    // handler ran and returned correctly.
+    unsafe { core::arch::asm!("int3", options(nomem, nostack)) };
+    kprintln!("resumed after breakpoint");
 
     fill_screen(info, 0x00, 0x33, 0x99);
     kprintln!("framebuffer painted");
