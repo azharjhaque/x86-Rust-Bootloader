@@ -3,6 +3,7 @@
 
 use boot_info::{BootInfo, PixelFormatKind};
 
+mod gdt;
 mod port;
 mod qemu_exit;
 mod serial;
@@ -36,6 +37,10 @@ pub extern "sysv64" fn _start(boot_info: *const BootInfo) -> ! {
         info.framebuffer.addr
     );
     kprintln!("kernel image: base={:#x} size={:#x}", info.kernel_base, info.kernel_size);
+
+    unsafe { gdt::init() };
+    kprintln!("GDT + TSS loaded (code selector {:#x})", gdt::KERNEL_CODE_SELECTOR);
+    kprintln!("double-fault IST index: {}", gdt::DOUBLE_FAULT_IST_INDEX);
 
     fill_screen(info, 0x00, 0x33, 0x99);
     kprintln!("framebuffer painted");
