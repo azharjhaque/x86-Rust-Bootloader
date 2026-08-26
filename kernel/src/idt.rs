@@ -150,6 +150,52 @@ extern "x86-interrupt" fn breakpoint_handler(frame: InterruptStackFrame) {
     );
 }
 
+/// Print a uniform report for a CPU exception and stop.
+///
+/// Every fault handler funnels through this so the output format is one
+/// thing rather than N slightly different ones, and so adding a register
+/// dump later is a single edit.
+fn report_fault(name: &str, frame: &InterruptStackFrame, error_code: Option<u64>) -> ! {
+    crate::kprintln!();
+    crate::kprintln!("EXCEPTION: {name}");
+    crate::kprintln!("  instruction pointer: {:#x}", frame.instruction_pointer);
+    crate::kprintln!("  code segment:        {:#x}", frame.code_segment);
+    crate::kprintln!("  cpu flags:           {:#x}", frame.cpu_flags);
+    crate::kprintln!("  stack pointer:       {:#x}", frame.stack_pointer);
+    if let Some(code) = error_code {
+        crate::kprintln!("  error code:          {code:#x}");
+    }
+    crate::kprintln!("  unrecoverable — halting");
+
+    crate::qemu_exit::exit(crate::qemu_exit::QemuExitCode::Failed)
+}
+
+extern "x86-interrupt" fn divide_error_handler(frame: InterruptStackFrame) -> ! {
+    report_fault("divide error (#DE)", &frame, None)
+}
+
+extern "x86-interrupt" fn invalid_opcode_handler(frame: InterruptStackFrame) -> ! {
+    report_fault("invalid opcode (#UD)", &frame, None)
+}
+
+extern "x86-interrupt" fn general_protection_handler(
+    frame: InterruptStackFrame,
+    error_code: u64,
+) -> ! {
+    report_fault("general protection fault (#GP)", &frame, Some(error_code))
+}
+
+/// Page faults also set CR2 to the offending address. Reading it is the
+/// single most useful thing this handler can do, and it costs one
+/// instruction.
+extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, error_code: u64) -> ! {
+    let cr2: u64;
+    unsafe { core::arch::asm!("mov {}, cr2", out(reg) cr2, options(nomem, nostack, preserves_flags)) };
+    crate::kprintln!();
+    crate::kprintln!("  faulting address (CR2): {cr2:#x}");
+    report_fault("page fault (#PF)", &frame, Some(error_code))
+}
+
 /// Vector 8, raised when the CPU fails to deliver an earlier exception —
 /// for example because that exception's IDT entry is absent.
 ///
@@ -162,14 +208,12 @@ extern "x86-interrupt" fn breakpoint_handler(frame: InterruptStackFrame) {
 /// resetting the machine. A triple fault gives no diagnostics at all —
 /// under QEMU's `-no-reboot` it is simply a dead VM.
 ///
-/// This handler is reached by *any* unhandled exception, not just the one
-/// `main.rs` deliberately provokes with `ud2`. It only reports success when
-/// both `crate::expecting_double_fault()` is true (set immediately before
-/// the deliberate `ud2`) and the IST switch is confirmed to have happened;
-/// any other double fault — a real bug escalating through a missing
-/// handler, or a broken IST setup — reports failure instead. Without this
-/// check the handler would report success unconditionally and the harness
-/// could never fail.
+/// Now that the common CPU exceptions (`#DE`, `#UD`, `#GP`, `#PF`) all have
+/// their own handlers, nothing in the kernel deliberately provokes a double
+/// fault any more, so reaching this handler at all means some other vector
+/// escalated unexpectedly. It keeps its dual-stack diagnostic — confirming
+/// the IST switch happened is still genuinely useful — but the verdict is
+/// now unconditional: any double fault is a failure.
 extern "x86-interrupt" fn double_fault_handler(
     frame: InterruptStackFrame,
     _error_code: u64,
@@ -189,21 +233,13 @@ extern "x86-interrupt" fn double_fault_handler(
     crate::kprintln!("  interrupted stack:    {:#x}", frame.stack_pointer);
     crate::kprintln!("  handler stack:        {:#x}", handler_rsp);
     crate::kprintln!("  fault stack spans:    {fault_lo:#x}..{fault_hi:#x}");
-    let on_ist = handler_rsp >= fault_lo && handler_rsp < fault_hi;
-    if on_ist {
-        crate::kprintln!("  handler is running on the IST stack — the machine did not reset");
+    if handler_rsp >= fault_lo && handler_rsp < fault_hi {
+        crate::kprintln!("  handler ran on the IST stack — the machine did not reset");
     } else {
         crate::kprintln!("  WARNING: handler is NOT on the IST stack; the switch did not happen");
     }
 
-    if !crate::expecting_double_fault() {
-        crate::kprintln!("  this double fault was NOT expected — some earlier vector is unhandled");
-        crate::qemu_exit::exit(crate::qemu_exit::QemuExitCode::Failed);
-    }
-    if !on_ist {
-        crate::qemu_exit::exit(crate::qemu_exit::QemuExitCode::Failed);
-    }
-    crate::qemu_exit::exit(crate::qemu_exit::QemuExitCode::Success)
+    crate::qemu_exit::exit(crate::qemu_exit::QemuExitCode::Failed)
 }
 
 /// Install the handlers this milestone provides and load the table.
@@ -213,7 +249,11 @@ extern "x86-interrupt" fn double_fault_handler(
 /// selector that function installs.
 pub unsafe fn init() {
     unsafe {
+        set_handler(0, divide_error_handler as *const () as u64);
         set_handler(3, breakpoint_handler as *const () as u64);
+        set_handler(6, invalid_opcode_handler as *const () as u64);
+        set_handler(13, general_protection_handler as *const () as u64);
+        set_handler(14, page_fault_handler as *const () as u64);
         set_handler_with_ist(
             8,
             double_fault_handler as *const () as u64,
