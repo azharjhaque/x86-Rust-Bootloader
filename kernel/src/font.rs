@@ -8,13 +8,18 @@
 //! [`glyph`] substitutes `?` for anything else.
 
 /// Width of a glyph in pixels. One byte per scanline, so this is 8.
+#[expect(dead_code)]
 pub const GLYPH_WIDTH: usize = 8;
 /// Height of a glyph in pixels.
+#[expect(dead_code)]
 pub const GLYPH_HEIGHT: usize = 16;
 
+#[expect(dead_code)]
 const FIRST: u8 = 0x20;
+#[expect(dead_code)]
 const LAST: u8 = 0x7e;
 
+#[expect(dead_code)]
 static GLYPHS: [[u8; GLYPH_HEIGHT]; 95] = [
     // 0x20 space
     [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
