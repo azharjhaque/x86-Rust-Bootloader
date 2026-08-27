@@ -109,6 +109,45 @@ which is what leaves the window open to type into.
 use. Full prerequisites, the annotated boot trace, and the failure-path test
 are in **[docs/running.md](docs/running.md)**.
 
+## On real hardware
+
+The bootloader is an ordinary UEFI application, so booting it on a physical
+machine is mostly a copy: `cargo xtask run` to stage `target/esp`, copy that
+tree onto a FAT32 USB stick so `EFI/BOOT/BOOTX64.EFI` and `kernel.elf` sit at
+its root, disable Secure Boot, and boot from it.
+
+**This has not been tested on a physical machine.** QEMU is the only target
+that is actually verified, and several assumptions the code makes are true
+there and not guaranteed anywhere else:
+
+- **The keyboard works only if it is behind the i8042 controller.** A
+  desktop with a PS/2 keyboard, or a laptop whose built-in keyboard is wired
+  through the embedded controller as i8042, should work — and you get
+  continuous echo, since without a QEMU debug-exit device the kernel falls
+  into its idle loop with interrupts live. A USB HID keyboard will not work:
+  that needs xHCI and HID drivers, which do not exist here, and firmware
+  PS/2 emulation is generally withdrawn at `ExitBootServices`. Where it does
+  work it is lowercase only — no modifier handling.
+- **There is probably no serial port.** COM1 at `0x3F8` is absent from most
+  modern machines, so the boot trace appears only on the framebuffer.
+- **The timer wait is unbounded.** The kernel spins until 100 PIT ticks
+  arrive. Under QEMU a dead IRQ0 is caught by `xtask`'s timeout; on hardware
+  nothing catches it, so a chipset without 8259/8254 emulation hangs
+  silently.
+- **The kernel loads at a fixed physical address** (2 MiB, requested
+  exactly), and fails with `AllocationFailed` rather than relocating if
+  firmware has reserved that range.
+- **Nothing powers the machine off.** The QEMU debug-exit port does not
+  exist, so the exit path falls into a `hlt` loop.
+
+Realistically: expect a blue screen with the trace through both allocators
+and the timer confirmation. With an i8042 keyboard you can then type into
+it; without one you get `keyboard: no input within 10s` and a halt. Either
+way, getting that far means the ELF loader, handoff, descriptor tables,
+framebuffer console, and both allocators all worked on hardware they have
+never seen. Step-by-step instructions and the full list of failure modes are
+in [docs/running.md](docs/running.md#running-on-real-hardware).
+
 ## Repository layout
 
 ```

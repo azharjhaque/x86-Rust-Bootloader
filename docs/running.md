@@ -112,6 +112,127 @@ leaves behind. Milestone 6 allocates *physical* memory only. Making the
 double-fault handler testable again therefore stays future work, alongside
 paging.
 
+## Running on real hardware
+
+**None of this has been tested on a physical machine.** The project targets
+QEMU, and every automated check runs there. What follows is what the code
+implies should happen, together with the reasons it may not. Treat it as a
+starting point for an experiment, not a supported path.
+
+The bootloader is an ordinary UEFI application, so the mechanics are simple:
+put the staged ESP on a FAT32 volume and boot it.
+
+```bash
+cargo xtask run          # stages target/esp
+lsblk                    # identify the USB device FIRST
+```
+
+Then, replacing `sdX1` with your USB stick's partition:
+
+```bash
+sudo mkfs.vfat -F 32 /dev/sdX1
+```
+
+**That erases the device.** Check `lsblk` output carefully; getting the
+letter wrong destroys whatever is on the other disk. Then copy the staged
+tree across:
+
+```bash
+sudo mount /dev/sdX1 /mnt
+sudo cp -r target/esp/. /mnt/
+sudo umount /mnt
+```
+
+The result is `EFI/BOOT/BOOTX64.EFI` and `kernel.elf` at the volume root,
+which is the fallback path UEFI firmware looks for with no boot entry
+configured. A GPT partition table with the partition typed as EFI System
+(`EF00`) is the reliable arrangement; many firmwares will boot a plain FAT32
+stick anyway.
+
+In firmware setup you will need to **disable Secure Boot** — the `.efi` is
+unsigned — and boot in UEFI mode rather than CSM/legacy.
+
+### What will probably go wrong
+
+In rough order of how likely they are to stop you:
+
+**The keyboard works only if it is behind the i8042 controller.** This is
+the dividing line, and it is not the same as "real hardware versus QEMU".
+
+If the machine has a genuine 8042 — a desktop with a PS/2 port and a PS/2
+keyboard, or one of the many laptops whose built-in keyboard is wired
+through the embedded controller as i8042 — then it should work.
+`ps2::init` reads the controller's existing configuration byte, enables the
+IRQ1 interrupt and the port clock, and writes it back, deliberately leaving
+the translation bit alone. Firmware normally leaves translation enabled,
+which makes the controller emit scancode set 1, which is what
+`keyboard::read_key` decodes. Nothing in that path is QEMU-specific.
+
+If the keyboard is USB HID — most modern laptops, and any desktop with a USB
+keyboard and no PS/2 port — it will not. That needs an xHCI controller
+driver and a USB HID driver, neither of which exists here. Firmware often
+emulates PS/2 for USB keyboards during boot services, but that emulation is
+generally withdrawn at `ExitBootServices`, which is exactly when the kernel
+starts to care.
+
+When it does work, expect *continuous* echo rather than a single keystroke:
+with no `isa-debug-exit` device present, the kernel prints its IRQ1
+confirmation, falls through `qemu_exit::exit` into the `hlt` loop with
+interrupts still enabled, and keeps printing a `key: 'x'` line for every
+key you press. Three limits remain even then — no modifier handling, so
+lowercase only; no `0xE0` extended scancodes, so arrow keys and similar are
+ignored; and if some firmware has left controller translation *off*, the
+keyboard sends set 2 and you will get the wrong letters rather than
+nothing.
+
+When it does not work, the failure is clean: `waiting for a keypress...`,
+ten seconds, then `keyboard: no input within 10s - IRQ1 is not delivering`,
+then a halt. A machine with no 8042 at all is handled earlier and more
+explicitly — every wait in `ps2::init` is bounded by an iteration budget
+and reports which step timed out, so a missing controller produces a named
+diagnostic instead of a silent hang.
+
+**There is probably no serial port.** The UART driver targets COM1 at
+`0x3F8`, which most machines built in the last fifteen years do not have.
+The boot trace will only appear on the framebuffer. There is a hang risk
+here too: `serial::write_byte` polls the line-status register until the
+transmit holding register reports empty. Unmapped x86 I/O ports conventionally
+read back `0xFF`, which has that bit set, so the loop exits immediately —
+but a machine that returns `0x00` instead would hang before anything is
+drawn at all.
+
+**The timer wait has no timeout.** The kernel spins until it has seen 100
+PIT ticks, and nothing bounds that loop; under QEMU it is `xtask`'s
+60-second timeout that catches a dead IRQ0, and on hardware there is no
+`xtask`. A machine whose chipset does not emulate the 8259 PIC and 8254 PIT
+will hang silently after `enabling interrupts`. Most x86 hardware still
+provides both, but "most" is doing real work in that sentence.
+
+**The kernel loads at a fixed physical address.** `kernel.ld` places it at
+2 MiB and the loader requests exactly those pages with
+`AllocateType::Address`, which fails outright rather than relocating if
+firmware has already reserved that range. The symptom is early and clear:
+`failed to load kernel ELF: AllocationFailed`.
+
+**Nothing shuts the machine down.** `qemu_exit::exit` writes to the QEMU
+debug-exit port, which does not exist on real hardware, so the write is
+ignored and control falls into a `hlt` loop. The machine sits there until
+you power it off. That is by design, and it is the same fallback that makes
+the interactive QEMU screenshot possible.
+
+### What success looks like
+
+A blue screen with the boot trace through both allocators and the timer
+confirmation. From there it depends on the keyboard: on a machine with a
+real 8042 you should be able to type, each key adding a `key: 'x'` line,
+indefinitely. On a USB-only machine you get the ten-second timeout message
+and a halt instead.
+
+Either way, reaching the allocator lines means the ELF loader, the handoff,
+the GDT and IDT, the framebuffer console, and both allocators all worked on
+hardware they have never seen. A keyboard timeout at the end is the known
+limit of a PS/2-only driver, not a regression.
+
 ## Testing the failure path
 
 ```bash
