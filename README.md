@@ -21,7 +21,7 @@ freestanding kernel that sets up its own GDT, IDT, and interrupt
 controllers, then manages its own physical memory with a frame allocator and
 a coalescing heap.
 
-## The parts worth reading
+## Notable Parts
 
 Most of this project's value is in the places where the hardware or the
 firmware contract refuses to cooperate. A few of those:
