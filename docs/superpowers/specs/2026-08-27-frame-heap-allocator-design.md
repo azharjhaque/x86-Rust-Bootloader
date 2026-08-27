@@ -149,10 +149,14 @@ promise about future discipline.
 
 ### Heap sizing and placement
 
-256 contiguous frames (1 MiB), requested once at `heap::init`. QEMU hands
-the kernel hundreds of MiB of conventional memory, so this is comfortably
-available, and 1 MiB is ample for the selftest plus Milestone 7 keyboard
-buffering.
+256 contiguous frames (1 MiB), requested once at `heap::init`. `xtask` boots
+QEMU with `-m 256M`, so the heap is well under one percent of available RAM
+and a single conventional region will comfortably hold it. 1 MiB is ample
+for the selftest plus Milestone 7 keyboard buffering.
+
+If the target's RAM is ever reduced, this is the first constant to revisit:
+the failure is loud (a serial line and exit `Failed` at `heap::init`), not
+silent.
 
 ## Integration with the existing kernel
 
