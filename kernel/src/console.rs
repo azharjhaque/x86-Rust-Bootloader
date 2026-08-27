@@ -41,22 +41,11 @@ fn pack(format: PixelFormatKind, red: u8, green: u8, blue: u8) -> u32 {
 /// Prepare the console. Until this runs, [`write_byte`] does nothing.
 ///
 /// # Safety
-/// Call once, before any `kprintln!` that should reach the screen, with a
-/// `FrameBufferInfo` the bootloader validated.
+/// Call once, before any screen output should reach the console. Invalid
+/// framebuffer descriptions leave it disabled.
 pub unsafe fn init(framebuffer: &FrameBufferInfo) {
-    let format = framebuffer.pixel_format().unwrap_or(PixelFormatKind::Bgr);
-
-    let console = Console {
-        framebuffer: *framebuffer,
-        column: 0,
-        row: 0,
-        columns: framebuffer.width as usize / GLYPH_WIDTH,
-        rows: framebuffer.height as usize / GLYPH_HEIGHT,
-        foreground: pack(format, 0xE0, 0xE0, 0xE0),
-        background: pack(format, 0x00, 0x33, 0x99),
-    };
-
-    unsafe { CONSOLE = Some(console) };
+    // SAFETY: init is called once before any writer can run.
+    unsafe { CONSOLE = Console::new(framebuffer) };
 }
 
 /// Write one byte to the screen, or do nothing if [`init`] has not run.
@@ -71,6 +60,44 @@ pub fn write_byte(byte: u8) {
 }
 
 impl Console {
+    /// Construct a console only when every later framebuffer access is safe.
+    ///
+    /// The renderer stores one u32 per pixel and always addresses pixels
+    /// through stride, so this validates the complete span it can reach.
+    fn new(framebuffer: &FrameBufferInfo) -> Option<Self> {
+        let format = framebuffer.pixel_format()?;
+        let width = framebuffer.width as usize;
+        let height = framebuffer.height as usize;
+        let stride = framebuffer.stride as usize;
+
+        if framebuffer.addr == 0
+            || framebuffer.addr % core::mem::align_of::<u32>() as u64 != 0
+            || framebuffer.bytes_per_pixel != core::mem::size_of::<u32>() as u32
+            || stride < width
+            || width < GLYPH_WIDTH
+            || height < GLYPH_HEIGHT
+        {
+            return None;
+        }
+
+        let pixels = stride.checked_mul(height)?;
+        let bytes = pixels.checked_mul(core::mem::size_of::<u32>())?;
+        let bytes = u64::try_from(bytes).ok()?;
+        if bytes > framebuffer.size || framebuffer.addr.checked_add(bytes).is_none() {
+            return None;
+        }
+
+        Some(Self {
+            framebuffer: *framebuffer,
+            column: 0,
+            row: 0,
+            columns: width / GLYPH_WIDTH,
+            rows: height / GLYPH_HEIGHT,
+            foreground: pack(format, 0xE0, 0xE0, 0xE0),
+            background: pack(format, 0x00, 0x33, 0x99),
+        })
+    }
+
     fn write_byte(&mut self, byte: u8) {
         match byte {
             b'\n' => self.newline(),
@@ -119,8 +146,9 @@ impl Console {
                 } else {
                     self.background
                 };
-                // SAFETY: x < width and y < height by construction, and the
-                // framebuffer spans width*height pixels at `stride` apart.
+                // SAFETY: Console::new established a nonzero full-cell
+                // geometry, stride >= width, and a checked framebuffer byte
+                // span. This cell's coordinates are inside that span.
                 unsafe {
                     self.pixel(origin_x + dx, origin_y + dy)
                         .write_volatile(colour)
@@ -143,9 +171,9 @@ impl Console {
         let base = self.framebuffer.addr as *mut u32;
         let pixels = height * stride;
 
-        // SAFETY: source and destination are both inside the framebuffer,
-        // and `copy` (not `copy_nonoverlapping`) is correct because they
-        // overlap.
+        // SAFETY: Console::new proved height >= GLYPH_HEIGHT and the whole
+        // stride * height pixel span is inside the framebuffer. copy is
+        // correct because source and destination overlap.
         unsafe {
             core::ptr::copy(base.add(shift), base, pixels - shift);
         }
