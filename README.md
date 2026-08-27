@@ -18,17 +18,8 @@ as they are typed.
 Boots under OVMF, loads a separate kernel ELF off the EFI System Partition,
 parses and maps it by hand, exits UEFI boot services, and jumps to a
 freestanding kernel that sets up its own GDT, IDT, and interrupt
-controllers, then manages its own physical memory.
-
-All seven milestones are complete:
-
-- [x] 1. Toolchain bootstrap — empty UEFI app boots in QEMU/OVMF
-- [x] 2. Bootloader: ELF loader, memory map, framebuffer, handoff to kernel
-- [x] 3. Kernel: GDT, IDT, double-fault handler
-- [x] 4. Kernel: PIT timer + PS/2 keyboard interrupts
-- [x] 5. Kernel: framebuffer text rendering and serial fan-out
-- [x] 6. Kernel: physical frame allocator + heap allocator
-- [x] 7. Polish: docs, screenshot, write-up
+controllers, then manages its own physical memory with a frame allocator and
+a coalescing heap.
 
 ## The parts worth reading
 
@@ -89,11 +80,30 @@ Requires a Debian/Ubuntu system (WSL2 works) with QEMU and OVMF:
 sudo apt install -y build-essential qemu-system-x86 ovmf git curl
 ```
 
-Then:
+Build, boot, and run the automated checks:
 
 ```bash
 cargo xtask run
 ```
+
+That runs headless and prints the boot trace to your terminal. To watch it
+on an actual screen and type into it yourself, stage the image first and
+then launch QEMU with a display attached:
+
+```bash
+cargo xtask run
+qemu-system-x86_64 \
+  -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+  -drive if=pflash,format=raw,file=target/OVMF_VARS.fd \
+  -drive format=raw,file=fat:rw:target/esp \
+  -m 256M
+```
+
+A QEMU window opens, the kernel paints it blue, and the boot trace appears
+in the framebuffer console. Anything you type shows up as it arrives on
+IRQ1. Note the missing `-device isa-debug-exit` here: without it the kernel's
+exit path falls through into its idle loop instead of shutting QEMU down,
+which is what leaves the window open to type into.
 
 `rust-toolchain.toml` pins the nightly and installs both targets on first
 use. Full prerequisites, the annotated boot trace, and the failure-path test
@@ -107,7 +117,7 @@ are in **[docs/running.md](docs/running.md)**.
 ├── kernel/       # freestanding kernel ELF, no_std, x86_64-unknown-none
 ├── xtask/        # build automation: stages the ESP, launches QEMU
 ├── tools/        # one-off authoring scripts (font, screenshot)
-└── docs/         # design spec, per-milestone plans, running guide
+└── docs/         # design spec and running guide
 ```
 
 ## How it is tested
@@ -126,27 +136,12 @@ broken invariant fails the build rather than printing a warning nobody
 reads. Keyboard input is injected through QEMU's monitor, so the interrupt
 tests need no human.
 
-## What is deliberately not here
-
-Scope was fixed up front in [docs/design.md](docs/design.md) and held:
-
-- **No custom page tables.** The kernel runs on the identity mapping UEFI
-  leaves behind. Milestone 6 allocates *physical* memory only.
-- **No stack guard page,** which follows from the above — so the
-  double-fault handler, though installed and running on its own IST stack,
-  is not exercised by the current boot path.
-- **No scheduler, no user mode, no filesystem driver, no BIOS boot path.**
-- **QEMU only.** The keyboard driver is legacy PS/2; real hardware that
-  exposes its keyboard over USB/xHCI would need an HID driver, which is a
-  subsystem rather than an extension.
-
 ## Documentation
 
-- [docs/design.md](docs/design.md) — the design spec, with every decision
-  that changed recorded inline rather than rewritten
+- [docs/design.md](docs/design.md) — the design: scope, architecture, boot
+  flow, memory management, and the decisions that changed along the way
 - [docs/running.md](docs/running.md) — prerequisites, build/run, annotated
   trace, failure-path test
-- [docs/plans/](docs/plans/) — per-milestone implementation plans
 
 ## License
 
