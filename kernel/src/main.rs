@@ -2,10 +2,11 @@
 #![no_main]
 #![feature(abi_x86_interrupt)]
 
-use boot_info::{BootInfo, PixelFormatKind};
+use boot_info::{BootInfo, PixelFormatKind, PAGE_SIZE};
 
 mod console;
 mod font;
+mod frame;
 mod gdt;
 mod idt;
 mod interrupts;
@@ -37,7 +38,13 @@ pub extern "sysv64" fn _start(boot_info: *const BootInfo) -> ! {
         kprintln!("FATAL: boot_info pointer is null");
         qemu_exit::exit(qemu_exit::QemuExitCode::Failed);
     }
-    let info = unsafe { &*boot_info };
+    // `'static` is correct rather than merely convenient: this points at
+    // memory the bootloader allocated as LOADER_DATA, which survives
+    // ExitBootServices and is never reclaimed. Saying so here, where the
+    // reference is created from the raw pointer, is what lets the frame
+    // allocator hold the memory-region slice for the life of the kernel
+    // without a lifetime transmute at its door.
+    let info: &'static BootInfo = unsafe { &*boot_info };
     if !info.is_valid() {
         kprintln!("FATAL: boot_info failed validation (magic/version/format)");
         qemu_exit::exit(qemu_exit::QemuExitCode::Failed);
@@ -47,7 +54,7 @@ pub extern "sysv64" fn _start(boot_info: *const BootInfo) -> ! {
 }
 
 /// Everything the kernel does, once `BootInfo` is known good.
-fn kernel_main(info: &BootInfo) -> ! {
+fn kernel_main(info: &'static BootInfo) -> ! {
     kprintln!(
         "framebuffer: {}x{} stride={} @ {:#x}",
         info.framebuffer.width,
@@ -73,6 +80,27 @@ fn kernel_main(info: &BootInfo) -> ! {
     if skipped > 0 {
         kprintln!("  note: {skipped} pixels skipped as out of bounds");
     }
+
+    // Memory management comes up here, after the console exists and before
+    // interrupts are enabled. Both halves of that placement matter — see
+    // `docs/plans/milestone-6-frame-allocator.md`.
+    //
+    // SAFETY: `info` was validated in `_start`, so its region pointer and
+    // length describe the live array the bootloader handed over.
+    let total_frames = frame::init(unsafe { info.memory_regions() });
+    if total_frames == 0 {
+        kprintln!("FATAL: no usable memory regions in the UEFI memory map");
+        qemu_exit::exit(qemu_exit::QemuExitCode::Failed);
+    }
+    kprintln!(
+        "frame allocator: {total_frames} usable frames ({} MiB)",
+        total_frames * PAGE_SIZE / (1024 * 1024)
+    );
+    if let Err(reason) = frame::selftest() {
+        kprintln!("FATAL: frame allocator selftest: {reason}");
+        qemu_exit::exit(qemu_exit::QemuExitCode::Failed);
+    }
+    kprintln!("frame allocator: selftest passed");
 
     kprintln!("enabling interrupts");
     unsafe { interrupts::enable() };
