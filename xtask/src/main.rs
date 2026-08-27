@@ -1,6 +1,6 @@
 use std::env;
 use std::fs;
-use std::io::Write as _;
+use std::io::{ErrorKind, Write as _};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -18,8 +18,10 @@ const EXPECTED_EXIT_CODE: i32 = 33;
 // Matches qemu_exit::QemuExitCode::Failed (0x11): (0x11 << 1) | 1 = 35.
 const FAILURE_EXIT_CODE: i32 = 35;
 
-/// Where the guest framebuffer capture is written.
-const SCREENSHOT: &str = "/tmp/rust_bl_screen.ppm";
+/// Where this run's guest framebuffer capture is written.
+fn screenshot_path() -> PathBuf {
+    PathBuf::from(format!("/tmp/rust_bl_screen_{}.ppm", std::process::id()))
+}
 /// The GOP surface dimensions QEMU exposes to this test.
 const KERNEL_SCREENSHOT_DIMENSIONS: &[u8] = b"1280 800";
 
@@ -86,7 +88,8 @@ fn run() -> ExitCode {
         }
     };
 
-    let observed = match boot_qemu(&staged, true) {
+    let screenshot = screenshot_path();
+    let observed = match boot_qemu(&staged, true, &screenshot) {
         Ok(code) => code,
         Err(msg) => {
             eprintln!("FAIL: {msg}");
@@ -96,7 +99,7 @@ fn run() -> ExitCode {
 
     match observed {
         Some(EXPECTED_EXIT_CODE) => {
-            if let Err(msg) = check_screen_has_text() {
+            if let Err(msg) = check_screen_has_text(&screenshot) {
                 eprintln!("FAIL: {msg}");
                 return ExitCode::FAILURE;
             }
@@ -125,10 +128,9 @@ fn run() -> ExitCode {
 /// means glyphs reached the screen. This is deliberately a weak assertion
 /// about *what* was drawn and a strong one about *whether* anything was --
 /// the serial trace already covers content.
-fn check_screen_has_text() -> Result<(), String> {
-    let data = fs::read(SCREENSHOT)
-        .map_err(|e| format!("no screen capture at {SCREENSHOT}: {e}"))?;
-
+fn check_screen_has_text(screenshot: &Path) -> Result<(), String> {
+    let data = fs::read(screenshot)
+        .map_err(|e| format!("no screen capture at {}: {e}", screenshot.display()))?;
     // PPM: "P6\n<w> <h>\n<maxval>\n" then raw RGB triples.
     let mut parts = data.splitn(4, |b| *b == b'\n');
     let magic = parts.next().unwrap_or(b"");
@@ -212,7 +214,7 @@ fn test() -> ExitCode {
     // No keystroke injection here: this run is expected to fail before the
     // kernel ever enables interrupts, so there is nothing for it to prove
     // and no benefit to spawning the injector thread.
-    let observed = boot_qemu(&staged, false);
+    let observed = boot_qemu(&staged, false, &screenshot_path());
 
     // Restore before interpreting the result, so a failed boot never leaves
     // a corrupted image staged for the next `cargo xtask run`.
@@ -289,43 +291,42 @@ fn build_and_stage(root: &Path) -> Result<Staged, String> {
 /// afterward — which will not survive later milestones touching this code.
 /// With it, `XTASK_NO_KEYS=1 cargo xtask run` should fail on the kernel's
 /// own keyboard deadline instead.
-fn inject_keystrokes(socket_path: String) {
+fn inject_keystrokes(socket_path: String, screenshot: &Path) -> Result<(), String> {
     // Escape hatch for the negative test: with injection suppressed, the
     // kernel's own keyboard deadline should fire and the run should FAIL.
     // Without this, "the keyboard works" can only be disproved by editing
     // the kernel and reverting it.
     if std::env::var_os("XTASK_NO_KEYS").is_some() {
         eprintln!("note: XTASK_NO_KEYS set — not injecting keystrokes");
-        return;
+        return Ok(());
     }
 
-    thread::spawn(move || {
-        // Wait for QEMU to create the socket.
-        let mut stream = None;
-        for _ in 0..100 {
-            thread::sleep(Duration::from_millis(100));
-            if let Ok(s) = UnixStream::connect(&socket_path) {
-                stream = Some(s);
-                break;
-            }
+    // Wait for QEMU to create the socket.
+    let mut stream = None;
+    for _ in 0..100 {
+        thread::sleep(Duration::from_millis(100));
+        if let Ok(s) = UnixStream::connect(&socket_path) {
+            stream = Some(s);
+            break;
         }
-        let Some(mut stream) = stream else {
-            eprintln!("note: could not reach the QEMU monitor; no keys will be injected");
-            return;
-        };
+    }
+    let Some(mut stream) = stream else {
+        return Err("could not reach the QEMU monitor for screen capture".to_string());
+    };
 
-        // OVMF creates the monitor socket while its 640x480 firmware console
-        // is still active. Give the kernel time to switch to the 1280x800 GOP
-        // surface before capturing; the dimension check below rejects a stale
-        // firmware image if a slow host has not reached it yet.
-        thread::sleep(Duration::from_millis(4_500));
+    thread::sleep(Duration::from_millis(4_500));
+    match fs::remove_file(screenshot) {
+        Ok(()) => {}
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("failed to remove old screen capture {}: {e}", screenshot.display())),
+    }
+    stream.write_all(format!("screendump {}\n", screenshot.display()).as_bytes())
+        .map_err(|e| format!("failed to request screen capture: {e}"))?;
+    thread::sleep(Duration::from_millis(500));
+    fs::metadata(screenshot)
+        .map_err(|e| format!("screen capture was not created at {}: {e}", screenshot.display()))?;
 
-        // Capture the screen first: once a key lands the kernel finishes
-        // and exits, and there is nothing left to photograph.
-        let _ = fs::remove_file(SCREENSHOT);
-        let _ = stream.write_all(format!("screendump {SCREENSHOT}\n").as_bytes());
-        thread::sleep(Duration::from_millis(500));
-
+    thread::spawn(move || {
         // Keep injecting until the write fails (QEMU exited), which is
         // already the normal way this loop ends — not for a fixed number
         // of sends. The schedule has to outlast the kernel's *deadline*,
@@ -351,6 +352,7 @@ fn inject_keystrokes(socket_path: String) {
             }
         }
     });
+    Ok(())
 }
 
 /// Launch QEMU against the staged ESP and wait for it to exit.
@@ -364,7 +366,7 @@ fn inject_keystrokes(socket_path: String) {
 /// Returns the process exit code, or `None` if QEMU was terminated by a
 /// signal. Interpreting that code is the caller's job — `run` and `test`
 /// expect different ones.
-fn boot_qemu(staged: &Staged, inject: bool) -> Result<Option<i32>, String> {
+fn boot_qemu(staged: &Staged, inject: bool, screenshot: &Path) -> Result<Option<i32>, String> {
     let socket_path = monitor_socket_path();
     let _ = fs::remove_file(&socket_path);
 
@@ -409,7 +411,7 @@ fn boot_qemu(staged: &Staged, inject: bool) -> Result<Option<i32>, String> {
         })?;
 
     if inject {
-        inject_keystrokes(socket_path);
+        inject_keystrokes(socket_path, screenshot)?;
     }
 
     let deadline = Instant::now() + QEMU_TIMEOUT;
