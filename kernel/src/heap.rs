@@ -32,10 +32,11 @@ use boot_info::PAGE_SIZE;
 use crate::frame;
 use crate::interrupts;
 
-/// 1 MiB. Ample for the selftest and for Milestone 7's keyboard
-/// buffering, and well under a percent of the 256 MiB `xtask` boots QEMU
-/// with. If the target's memory is ever reduced this is the constant to
-/// revisit — the failure is loud, at `init`, rather than silent.
+/// 1 MiB. Ample for the selftest and for the later-milestone uses
+/// `design.md` anticipates (keyboard input buffering is the example it
+/// gives), and well under a percent of the 256 MiB `xtask` boots QEMU with.
+/// If the target's memory is ever reduced this is the constant to revisit —
+/// the failure is loud, at `init`, rather than silent.
 pub const HEAP_FRAMES: u64 = 256;
 
 /// The granularity every block start and size is a multiple of. Equal to

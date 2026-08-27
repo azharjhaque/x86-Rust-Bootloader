@@ -167,7 +167,10 @@ through `interrupts::without_interrupts`.
 256 contiguous frames (1 MiB), requested once at `heap::init`. `xtask` boots
 QEMU with `-m 256M`, so the heap is well under one percent of available RAM
 and a single conventional region will comfortably hold it. 1 MiB is ample
-for the selftest plus Milestone 7 keyboard buffering.
+for the selftest plus the later-milestone uses `design.md` anticipates
+(keyboard input buffering is the example it gives). Note that Milestone 7 is
+polish only and contains no such work — the sizing is headroom for whatever
+comes after the roadmap, not for a specific planned feature.
 
 If the target's RAM is ever reduced, this is the first constant to revisit:
 the failure is loud (a serial line and exit `Failed` at `heap::init`), not

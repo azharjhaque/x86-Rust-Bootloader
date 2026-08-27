@@ -814,7 +814,7 @@ use boot_info::PAGE_SIZE;
 use crate::frame;
 use crate::interrupts;
 
-/// 1 MiB. Ample for the selftest and for Milestone 7's keyboard
+/// 1 MiB. Ample for the selftest and for later-milestone keyboard
 /// buffering, and well under a percent of the 256 MiB `xtask` boots QEMU
 /// with. If the target's memory is ever reduced, this is the constant to
 /// revisit — the failure is loud, at `init`, not silent.
@@ -1298,4 +1298,6 @@ Milestone 6 is complete when Task 4 passes. What it deliberately leaves:
   is `heap::init`, which runs first, so this is theoretical today.
 - **No allocation from interrupt handlers yet.** It is *safe* — both
   allocators guard their state with `without_interrupts` — but nothing does
-  it. Milestone 7's keyboard buffering is the likely first user.
+  it. Keyboard input buffering — the example `design.md` gives for why the
+  kernel wants a heap at all — is the likely first user, though it is not
+  scheduled: Milestone 7 is polish only, so this sits after the roadmap.

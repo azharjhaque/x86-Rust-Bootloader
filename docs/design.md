@@ -81,12 +81,17 @@ two places.
 
 ## Memory management (MVP scope)
 
-~~Physical frame allocator: seeded from the UEFI memory map handed off in
-`BootInfo`; a simple free-list or bump allocator over `EfiConventionalMemory`
-regions is sufficient. Heap allocator: a small fixed-size kernel heap,
-registered as the kernel's `#[global_allocator]`, so `alloc::vec::Vec`,
-`Box`, etc. work for later milestones.~~ Built in milestone 6; what follows
-is what exists, not a plan.
+~~- Physical frame allocator: seeded from the UEFI memory map handed off in
+  `BootInfo`; a simple free-list or bump allocator over `EfiConventionalMemory`
+  regions is sufficient — no buddy allocator needed at this scope.~~
+~~- Heap allocator: a small fixed-size kernel heap (hand-rolled bump or
+  free-list allocator, registered as the kernel's `#[global_allocator]`) so
+  `alloc::vec::Vec`, `Box`, etc. work for later milestones (e.g., keyboard
+  input buffering).~~
+
+Resolved during milestone 6: both were built, and what follows describes
+what exists rather than what was planned. The original text above is kept
+struck through, as with the other resolved decisions in this document.
 
 - Physical frame allocator: seeded from the UEFI memory map handed off in
   `BootInfo`, filtered to `EfiConventionalMemory` regions. A bump cursor
