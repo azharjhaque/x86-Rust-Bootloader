@@ -116,8 +116,7 @@ machine is mostly a copy: `cargo xtask run` to stage `target/esp`, copy that
 tree onto a FAT32 USB stick so `EFI/BOOT/BOOTX64.EFI` and `kernel.elf` sit at
 its root, disable Secure Boot, and boot from it.
 
-QEMU is the only verified target, so the points below are limitations to
-know about rather than observed failures:
+The points below are limitations to know about
 
 - **Keyboard input needs an i8042 controller.** A desktop with a PS/2
   keyboard, or a laptop whose built-in keyboard is wired through the
