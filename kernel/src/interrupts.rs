@@ -29,12 +29,13 @@ where
     // function returns could hoist above the `cli`. Omitting `nomem` makes
     // each block an implicit compiler barrier (a memory clobber), so `f`'s
     // accesses are actually ordered to happen inside the critical section
-    // this function claims to provide. That is harmless today — the only
-    // state this protects so far is single aligned-word reads — but this
-    // is the kernel's one critical-section primitive, and Milestone 5's
-    // frame allocator and heap will protect genuinely multi-word state
-    // with exactly this function. Getting the barrier right now avoids a
-    // rare, non-reproducible free-list corruption later.
+    // this function claims to provide. That was harmless when written —
+    // the only state it protected then was single aligned-word reads — but
+    // this is the kernel's one critical-section primitive, and Milestone
+    // 6's frame allocator and heap now protect genuinely multi-word state
+    // (two intrusive linked lists) with exactly this function. Getting the
+    // barrier right in advance is what avoided a rare, non-reproducible
+    // free-list corruption here.
     if was_enabled {
         unsafe { asm!("cli", options(nostack)) };
     }

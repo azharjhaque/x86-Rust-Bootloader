@@ -81,13 +81,37 @@ two places.
 
 ## Memory management (MVP scope)
 
+~~Physical frame allocator: seeded from the UEFI memory map handed off in
+`BootInfo`; a simple free-list or bump allocator over `EfiConventionalMemory`
+regions is sufficient. Heap allocator: a small fixed-size kernel heap,
+registered as the kernel's `#[global_allocator]`, so `alloc::vec::Vec`,
+`Box`, etc. work for later milestones.~~ Built in milestone 6; what follows
+is what exists, not a plan.
+
 - Physical frame allocator: seeded from the UEFI memory map handed off in
-  `BootInfo`; a simple free-list or bump allocator over `EfiConventionalMemory`
-  regions is sufficient — no buddy allocator needed at this scope.
-- Heap allocator: a small fixed-size kernel heap (hand-rolled bump or
-  free-list allocator, registered as the kernel's `#[global_allocator]`) so
-  `alloc::vec::Vec`, `Box`, etc. work for later milestones (e.g., keyboard
-  input buffering).
+  `BootInfo`, filtered to `EfiConventionalMemory` regions. A bump cursor
+  walks those regions, and freed frames go onto an intrusive LIFO stack
+  whose nodes are written *into the free frames themselves* — so the
+  allocator needs no side table, and there is none of the bootstrap
+  awkwardness a bitmap would bring (a bitmap needs storage before any
+  allocator exists to provide it). No buddy allocator at this scope.
+
+  Filtering on `CONVENTIONAL` is load-bearing rather than merely tidy: the
+  bootloader allocates the kernel image, the kernel stack, `BootInfo`, and
+  the region array as `LOADER_DATA`, so that single check automatically
+  excludes every allocation the kernel is still running on — no
+  hand-maintained exclusion list to drift out of date.
+
+- Heap allocator: 1 MiB carved from 256 contiguous frames at boot, run as
+  an address-ordered free list with splitting and bidirectional coalescing,
+  registered as the kernel's `#[global_allocator]`. Headers live inside the
+  free blocks, as with the frame allocator. `Vec`, `Box`, and `String` all
+  work; coalescing is what keeps repeated `Vec` growth from shredding the
+  heap into unusable slivers.
+
+- Both allocators guard their multi-word state with
+  `interrupts::without_interrupts`, which on a single-core kernel is a
+  complete critical section.
 - No custom page tables in MVP: the kernel continues using whatever
   identity/mapping UEFI left in place. Building an independent paging setup
   is called out as future work, not designed here.

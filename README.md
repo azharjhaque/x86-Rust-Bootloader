@@ -8,12 +8,18 @@ rather than delegated to an existing library, milestone by milestone.
 
 ## Status
 
-Milestone 5 of 7 is complete and verified: the kernel now mirrors its boot
-trace to the framebuffer as well as COM1. The console draws glyphs directly
-onto the blue GOP surface, while xtask captures the kernel's 1280x800 screen
-and rejects a flat image. The existing 8259 PIC, PIT, and PS/2 keyboard
-checks remain automated, so the full boot trace is visible on machines
-without a serial port as well as in QEMU.
+Milestone 6 of 7 is complete and verified: the kernel now manages its own
+physical memory. A frame allocator seeded from the UEFI memory map hands out
+4 KiB frames, and a coalescing heap carved from 256 of those frames backs a
+`#[global_allocator]` — so `Box`, `Vec`, and `String` work inside the kernel.
+Both allocators are written from scratch with no allocator crate, and both
+store their free lists *inside the free memory itself* rather than in a side
+table, so a free frame or block costs zero bytes of bookkeeping.
+
+Everything from Milestone 5 still holds: the boot trace is mirrored to both
+COM1 and the framebuffer, xtask captures the kernel's 1280x800 screen and
+rejects a flat image, and the 8259 PIC, PIT, and PS/2 keyboard checks remain
+automated.
 
 See [docs/design.md](docs/design.md) for the full design, and
 [docs/plans/](docs/plans/) for implementation plans per milestone.
@@ -25,7 +31,7 @@ See [docs/design.md](docs/design.md) for the full design, and
 - [x] 3. Kernel: GDT, IDT, double-fault handler
 - [x] 4. Kernel: PIT timer + PS/2 keyboard interrupts
 - [x] 5. Kernel: framebuffer text rendering and serial fan-out
-- [ ] 6. Kernel: physical frame allocator + heap allocator
+- [x] 6. Kernel: physical frame allocator + heap allocator
 - [ ] 7. Polish: docs, screenshots/GIF, write-up
 
 ## Repository layout
@@ -102,6 +108,10 @@ PIT programmed at 100 Hz
 EXCEPTION: breakpoint at 0x200cc2 (execution will resume)
 selftest: breakpoint handled and execution resumed
 framebuffer painted
+frame allocator: 53195 usable frames (207 MiB)
+frame allocator: selftest passed
+heap: 1024 KiB @ 0x100000 (256 of 53195 frames in use)
+alloc: Box/Vec/String OK, heap balanced
 enabling interrupts
 key: 'a'
 timer: 100 ticks received — IRQ0 works
@@ -129,11 +139,17 @@ The double-fault handler from Milestone 3 is still installed as the
 safety net — vector 8 in the IDT still runs on its own IST stack — but it
 no longer appears in this trace. Milestone 3 could afford to provoke one
 deliberately on every boot, as the kernel had nothing left to do
-afterward; this milestone's kernel has to keep running to service IRQ0 and
-IRQ1, so nothing in the current boot path triggers a fault on purpose any
-more. Milestone 6's stack guard page will make a genuine stack-overflow
-double fault happen naturally, at which point this handler becomes
-testable again rather than just present.
+afterward; the kernel now has to keep running to service IRQ0 and IRQ1, so
+nothing in the current boot path triggers a fault on purpose any more.
+
+An earlier version of this README predicted that Milestone 6 would add a
+stack guard page and make a genuine stack-overflow double fault happen
+naturally. It did not: a guard page means unmapping a page, which means
+managing page tables, and
+[docs/design.md](docs/design.md) deliberately keeps custom paging out of
+the MVP — the kernel still runs on the identity mapping UEFI leaves behind.
+Milestone 6 allocates *physical* memory only. Making the double-fault
+handler testable again therefore stays future work, alongside paging.
 
 ## Testing the failure path
 

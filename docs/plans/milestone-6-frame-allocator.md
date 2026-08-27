@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust `nightly-2026-08-23`, edition 2024, `no_std`, target `x86_64-unknown-none`. No new dependencies — everything hand-rolled.
 
-**Spec:** `docs/superpowers/specs/2026-08-27-frame-heap-allocator-design.md`
+**Spec:** [docs/superpowers/specs/2026-08-27-frame-heap-allocator-design.md](../superpowers/specs/2026-08-27-frame-heap-allocator-design.md)
 
 ## Global Constraints
 
@@ -22,6 +22,82 @@ These apply to every task. They are not repeated per task.
 - **Allocator init goes after `console::init` and before `interrupts::enable()`.** Both halves are load-bearing — see Task 3, Step 1.
 - **Comment style:** this codebase explains *why*, not *what*, and records rejected alternatives. Match it. Every `unsafe` block carries a `// SAFETY:` comment naming the invariant that makes it sound.
 - **Regression bar, unchanged by this milestone:** `cargo test -p xtask` (3 pass), `cargo xtask run` (exit 33 + glyph), `cargo xtask test` (exit 35). No `xtask` source changes are required or expected.
+
+## Design decisions for this milestone
+
+**Both allocators are hand-rolled, closing the one question `design.md` left
+open.** The project's purpose is learning Rust systems programming and
+producing something worth showing. Delegating the one milestone that is
+*entirely* about allocation would have hollowed out both halves of that. The
+decision paid for itself: writing the heap surfaced two design errors (below)
+that pulling in `linked_list_allocator` would have hidden completely.
+
+**Two layers, and the frame allocator is load-bearing rather than
+decorative.** The heap does not use a static array in `.bss`; it asks the
+frame allocator for 256 contiguous frames. So the milestone's two halves
+actually compose, and a broken frame allocator fails the heap rather than
+sitting unused beside it.
+
+**Free lists live inside the free memory.** A free frame stores the next
+pointer in its own first eight bytes; a free heap block stores its header in
+its own first sixteen. Neither allocator needs a side table. This is sound
+only because the kernel runs on the identity mapping UEFI left in place —
+the premise `kernel.ld`'s header comment already records — which makes a
+physical address directly writable. It also sidesteps the bootstrap problem
+a bitmap allocator would have: a bitmap needs storage proportional to RAM,
+and that storage must be found *before* any allocator exists to provide it.
+
+**The 16-byte grid, which replaced a rule that could not have worked.** The
+spec originally said front padding smaller than a block header would be
+"absorbed into the allocation". That is unimplementable: `dealloc` receives
+only the payload pointer and the layout, so an absorbed prefix is
+unrecoverable and would leak on every such allocation. Instead every block
+start and size is a multiple of 16, and alignments are raised to at least
+16. A power-of-two alignment of 16 or more maps a 16-aligned address to a
+16-aligned address, so the front padding and tail remainder of any carve are
+themselves multiples of 16 — each either exactly zero or a whole header. The
+bad case cannot arise, rather than being handled.
+
+**The region arithmetic lives in `boot_info`, not the kernel.** Deciding
+which regions survive, where a run starts after alignment, and how many
+whole frames it really holds is pure arithmetic — and it is the part most
+likely to be subtly wrong. Placed in `boot_info` it host-tests under
+`cargo test -p boot_info`, where a mistake is a red test instead of a triple
+fault with no logger left to report it. The kernel-side module is left with
+only the pointer work.
+
+**Init ordering is load-bearing in both directions.** After `console::init`,
+because `xtask`'s screen check pixel-matches the top-left glyph against the
+`f` of "framebuffer painted" — initialising the allocators earlier changes
+the first glyph drawn and fails the run with an error about glyphs that says
+nothing about allocators. Before `interrupts::enable()`, so bring-up is
+single-threaded with no reentrancy to reason about, matching how
+GDT/IDT/PIC/PIT are already sequenced.
+
+**Filtering on `CONVENTIONAL` needs no exclusion list.** The bootloader
+allocates the kernel image, the kernel stack, `BootInfo`, and the region
+array as `LOADER_DATA`, so one check on the memory type automatically
+excludes everything the kernel is still running on. There is no
+hand-maintained list of forbidden ranges to drift out of date.
+
+**The coalescing test asserts block count, not free bytes — and the first
+version of it was wrong.** The selftest originally closed by checking that
+total free bytes returned to their starting value, described in both spec and
+plan as proving bidirectional coalescing. It does not. Total free bytes are
+**conserved whether or not neighbours merge**: a heap that split correctly
+and never coalesced would fragment into a chain of slivers summing to exactly
+the right total and pass the check. The assertion that actually sees it is
+the free-list *block count* returning to one. Verified by mutation —
+disabling both merge paths fires the block-count assertion while the byte
+balance stays silent. Both checks are kept, because they catch different
+faults: bytes catch a leak, blocks catch a coalescing failure.
+
+**Deliberately not built.** No page tables and no stack guard page: a guard
+page means unmapping a page, which means managing page tables, which
+`design.md` keeps out of MVP scope. An earlier README sentence promised the
+guard page for this milestone; that promise was wrong, and has been corrected
+rather than quietly honoured. The heap's backing frames are also never freed
+— the heap is created once at boot and lives as long as the kernel.
 
 ---
 
@@ -973,10 +1049,13 @@ Append to `kernel/src/heap.rs`:
 ```rust
 /// Boot-time proof that `alloc` works and that freeing restores the heap.
 ///
-/// The free-byte balance at the end is the real assertion: it only returns
-/// to its starting value if coalescing merges in both directions. A heap
-/// that splits correctly but never merges passes every other check here
-/// and fails this one.
+/// Two closing assertions, catching different faults. The free-byte
+/// balance catches a leak. The block count catches a coalescing failure,
+/// which the byte balance cannot see at all — total free bytes are
+/// conserved whether or not neighbours merge, so a heap that split and
+/// never merged would fragment into slivers summing to exactly the right
+/// total and pass the balance check. Only the block count returning to
+/// one shows that merging really happened.
 pub fn selftest() -> Result<(), &'static str> {
     use alloc::boxed::Box;
     use alloc::string::String;
@@ -1082,8 +1161,9 @@ replaces the spec's 'absorb small front padding' rule, which could not
 have worked: dealloc sees only the payload pointer and could never
 recover an absorbed prefix.
 
-The selftest's free-byte balance check is the real assertion — a heap
-that splits but never merges passes everything else and fails that.
+The selftest asserts the free-list block count, not just the free byte
+total. The byte total is conserved whether or not neighbours merge, so it
+cannot see a coalescing failure at all.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 ```
@@ -1181,3 +1261,41 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 **Placeholder scan.** No TBD/TODO. Every code step carries real code. The one intentionally deferred value is the sample trace numbers in Task 4 Step 2, which are explicitly marked to be replaced with real output.
 
 **Type consistency.** `FrameRun { start, frames }` is constructed in Task 1 and consumed in Task 2's `bump`/`init`. `PAGE_SIZE` is defined once in `boot_info` and imported by `frame.rs`, `heap.rs`, and `main.rs`. `HEAP_FRAMES` is defined in `heap.rs` and imported by `main.rs`. `selftest() -> Result<(), &'static str>` has the same signature in both modules and the same call shape at both call sites. `alloc_contiguous(frames: u64) -> Option<u64>` is produced in Task 2 and consumed in Task 3 with matching types.
+
+## What actually happened during execution
+
+Three things diverged from the plan as written. All three are recorded above
+in "Design decisions"; this is the short list.
+
+1. **A third spec deviation appeared, and it was a real bug in the test.**
+   The free-byte balance check does not prove coalescing — see the design
+   decisions above. Caught by asking whether the assertion could actually
+   fail, then proving it by mutation. Both spec and plan carried the wrong
+   claim and both were corrected.
+2. **Task 3's red step was a compile error, not a runtime failure.**
+   `extern crate alloc` will not link without a `#[global_allocator]`, so
+   the intended "skeleton heap returns None" intermediate state is not
+   reachable — the compiler demands the real thing first.
+3. **`frames_in_use`/`total_frames` were trimmed.** Written speculatively in
+   Task 2, they warned as dead code. `total_frames` went (init already
+   returns it); `frames_in_use` stayed and feeds the heap's trace line.
+
+## After this plan
+
+Milestone 6 is complete when Task 4 passes. What it deliberately leaves:
+
+- **No paging, and therefore no stack guard page.** Still blocked on the two
+  prerequisites Milestone 5's plan identified: `docs/design.md` rules page
+  tables out of MVP scope, and the kernel does not know where its stack is —
+  the bootloader passes only the top, in `rsp` — so a guard page needs a new
+  `BootInfo` field and a `BOOT_INFO_VERSION` bump. Neither was in scope here.
+- **The heap never grows and its frames are never freed.** 1 MiB, fixed at
+  boot. A heap that could ask the frame allocator for more on demand is the
+  natural next step if anything ever needs it.
+- **`alloc_contiguous` only ever serves the bump path.** A LIFO free stack
+  cannot promise adjacency, so a large contiguous request after heavy
+  fragmentation would fail even with plenty of free frames. The only caller
+  is `heap::init`, which runs first, so this is theoretical today.
+- **No allocation from interrupt handlers yet.** It is *safe* — both
+  allocators guard their state with `without_interrupts` — but nothing does
+  it. Milestone 7's keyboard buffering is the likely first user.
