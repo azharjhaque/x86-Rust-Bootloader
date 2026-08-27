@@ -30,6 +30,12 @@ pub const PIC2_OFFSET: u8 = PIC1_OFFSET + 8;
 /// IRQ0, the PIT.
 pub const TIMER_VECTOR: u8 = PIC1_OFFSET;
 /// IRQ1, the PS/2 keyboard.
+///
+/// Unused until Task 4 installs the keyboard handler. `expect` rather than
+/// `allow` so the build tells us to delete this attribute the moment the
+/// constant is actually referenced, instead of leaving a suppression nobody
+/// notices is stale.
+#[expect(dead_code)]
 pub const KEYBOARD_VECTOR: u8 = PIC1_OFFSET + 1;
 
 /// Remap both PICs and mask everything except the timer and keyboard.
