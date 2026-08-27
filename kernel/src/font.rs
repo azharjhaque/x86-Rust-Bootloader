@@ -7,11 +7,11 @@
 //! leftmost. Only printable ASCII (0x20..=0x7e) is stored;
 //! [`glyph`] substitutes `?` for anything else.
 
+#[expect(dead_code)]
 /// Width of a glyph in pixels. One byte per scanline, so this is 8.
-#[expect(dead_code)]
 pub const GLYPH_WIDTH: usize = 8;
-/// Height of a glyph in pixels.
 #[expect(dead_code)]
+/// Height of a glyph in pixels.
 pub const GLYPH_HEIGHT: usize = 16;
 
 #[expect(dead_code)]
@@ -213,6 +213,7 @@ static GLYPHS: [[u8; GLYPH_HEIGHT]; 95] = [
     [0x00, 0x00, 0x76, 0xdc, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
 ];
 
+#[expect(dead_code)]
 /// The bitmap for `byte`, or the bitmap for `?` if it is not printable.
 pub fn glyph(byte: u8) -> &'static [u8; GLYPH_HEIGHT] {
     let index = if (FIRST..=LAST).contains(&byte) {
