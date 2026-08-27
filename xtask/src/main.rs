@@ -1,6 +1,6 @@
 use std::env;
 use std::fs;
-use std::io::Write as _;
+use std::io::{ErrorKind, Write as _};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -18,10 +18,29 @@ const EXPECTED_EXIT_CODE: i32 = 33;
 // Matches qemu_exit::QemuExitCode::Failed (0x11): (0x11 << 1) | 1 = 35.
 const FAILURE_EXIT_CODE: i32 = 35;
 
+/// Where this run's guest framebuffer capture is written.
+fn screenshot_path() -> PathBuf {
+    PathBuf::from(format!("/tmp/rust_bl_screen_{}.ppm", std::process::id()))
+}
+/// The GOP surface dimensions QEMU exposes to this test.
+const KERNEL_SCREENSHOT_DIMENSIONS: &[u8] = b"1280 800";
+const KERNEL_SCREENSHOT_WIDTH: usize = 1280;
+const KERNEL_SCREENSHOT_HEIGHT: usize = 800;
+const KERNEL_BACKGROUND: [u8; 3] = [0x00, 0x33, 0x99];
+const KERNEL_FOREGROUND: [u8; 3] = [0xE0, 0xE0, 0xE0];
+// Bitmap for the first on-screen character, the `f` in "framebuffer painted".
+const KERNEL_FIRST_GLYPH: [u8; 16] = [
+    0x00, 0x00, 0x38, 0x6c, 0x64, 0x60, 0xf0, 0x60, 0x60, 0x60, 0x60, 0xf0, 0x00, 0x00, 0x00, 0x00,
+];
+
 /// How long to let QEMU run before assuming the bootloader hung and killing
 /// it. Without this, a boot hang blocks `cargo xtask run` forever with no
 /// way to report failure.
 const QEMU_TIMEOUT: Duration = Duration::from_secs(60);
+/// Maximum time to wait for a capture containing the kernel's first glyph.
+const SCREEN_CAPTURE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Delay between QEMU screendumps while waiting for the kernel framebuffer.
+const SCREEN_CAPTURE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Where QEMU's monitor socket lives. `xtask` connects to this to inject
 /// keystrokes, which is how the keyboard IRQ gets tested without a human.
@@ -81,7 +100,8 @@ fn run() -> ExitCode {
         }
     };
 
-    let observed = match boot_qemu(&staged, true) {
+    let screenshot = screenshot_path();
+    let observed = match boot_qemu(&staged, true, &screenshot) {
         Ok(code) => code,
         Err(msg) => {
             eprintln!("FAIL: {msg}");
@@ -91,7 +111,11 @@ fn run() -> ExitCode {
 
     match observed {
         Some(EXPECTED_EXIT_CODE) => {
-            println!("PASS: bootloader exited with expected code {EXPECTED_EXIT_CODE}");
+            if let Err(msg) = check_screen_has_text(&screenshot) {
+                eprintln!("FAIL: {msg}");
+                return ExitCode::FAILURE;
+            }
+            println!("PASS: bootloader exited with expected code {EXPECTED_EXIT_CODE}, and the screen has text");
             ExitCode::SUCCESS
         }
         Some(FAILURE_EXIT_CODE) => {
@@ -106,6 +130,142 @@ fn run() -> ExitCode {
             eprintln!("FAIL: qemu-system-x86_64 exited via signal, no exit code");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Check that the guest rendered the deterministic first console glyph.
+///
+/// The first framebuffer message is "framebuffer painted", so its top-left
+/// 8x16 cell must be the generated bitmap for `f` in the console's exact
+/// foreground and background colours. Firmware graphics cannot satisfy this.
+fn check_screen_has_text(screenshot: &Path) -> Result<(), String> {
+    let data = fs::read(screenshot)
+        .map_err(|e| format!("no screen capture at {}: {e}", screenshot.display()))?;
+    // PPM: "P6\n<w> <h>\n<maxval>\n" then raw RGB triples.
+    let mut parts = data.splitn(4, |b| *b == b'\n');
+    let magic = parts.next().unwrap_or(b"");
+    if magic != b"P6" {
+        return Err("screen capture is not a P6 PPM".to_string());
+    }
+    let dimensions = parts.next().unwrap_or(b"");
+    if dimensions != KERNEL_SCREENSHOT_DIMENSIONS {
+        return Err(format!(
+            "screen capture is not the 1280x800 kernel surface (got {})",
+            String::from_utf8_lossy(dimensions)
+        ));
+    }
+    let maxval = parts.next().unwrap_or(b"");
+    if maxval != b"255" {
+        return Err("screen capture PPM maxval is not 255".to_string());
+    }
+    let pixels = parts.next().unwrap_or(b"");
+    let expected_len = KERNEL_SCREENSHOT_WIDTH
+        .checked_mul(KERNEL_SCREENSHOT_HEIGHT)
+        .and_then(|pixels| pixels.checked_mul(3))
+        .ok_or_else(|| "kernel screenshot dimensions overflowed".to_string())?;
+    if pixels.len() != expected_len {
+        return Err(format!(
+            "screen capture pixel payload has {} bytes, expected {expected_len}",
+            pixels.len()
+        ));
+    }
+
+    for (y, scanline) in KERNEL_FIRST_GLYPH.iter().enumerate() {
+        for x in 0..8 {
+            let offset = (y * KERNEL_SCREENSHOT_WIDTH + x) * 3;
+            let expected = if scanline & (0x80 >> x) != 0 {
+                KERNEL_FOREGROUND
+            } else {
+                KERNEL_BACKGROUND
+            };
+            if pixels.get(offset..offset + 3) != Some(expected.as_slice()) {
+                return Err(
+                    "the kernel's expected first framebuffer glyph is not present".to_string(),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod screen_tests {
+    use super::*;
+
+    const SCREEN_WIDTH: usize = 1280;
+    const SCREEN_HEIGHT: usize = 800;
+
+    const EXPECTED_FIRST_GLYPH: [u8; 16] = [
+        0x00, 0x00, 0x38, 0x6c, 0x64, 0x60, 0xf0, 0x60, 0x60, 0x60, 0x60, 0xf0, 0x00, 0x00, 0x00,
+        0x00,
+    ];
+
+    fn kernel_text_pixels() -> Vec<u8> {
+        let mut pixels = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT * 3];
+        for chunk in pixels.chunks_exact_mut(3) {
+            chunk.copy_from_slice(&[0x00, 0x33, 0x99]);
+        }
+        for (y, scanline) in EXPECTED_FIRST_GLYPH.iter().enumerate() {
+            for x in 0..8 {
+                if scanline & (0x80 >> x) != 0 {
+                    let offset = (y * SCREEN_WIDTH + x) * 3;
+                    pixels[offset..offset + 3].copy_from_slice(&[0xe0, 0xe0, 0xe0]);
+                }
+            }
+        }
+        pixels
+    }
+
+    fn write_ppm(name: &str, maxval: u16, pixels: &[u8]) -> PathBuf {
+        let path = env::temp_dir().join(format!(
+            "rust_bl_{name}_{}_screen_test.ppm",
+            std::process::id()
+        ));
+        let mut ppm = format!("P6\n{SCREEN_WIDTH} {SCREEN_HEIGHT}\n{maxval}\n").into_bytes();
+        ppm.extend_from_slice(pixels);
+        fs::write(&path, ppm).expect("write test PPM");
+        path
+    }
+
+    #[test]
+    fn rejects_coloured_firmware_frame_without_kernel_text() {
+        let mut pixels = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT * 3];
+        pixels[3..6].copy_from_slice(&[0xff, 0xff, 0xff]);
+        let path = write_ppm("firmware_colours", 255, &pixels);
+
+        let result = check_screen_has_text(&path);
+        let _ = fs::remove_file(path);
+
+        assert!(
+            result.is_err(),
+            "a generic multicolour firmware frame must not prove kernel text"
+        );
+    }
+
+    #[test]
+    fn rejects_ppm_with_nonstandard_maxval() {
+        let pixels = kernel_text_pixels();
+        let path = write_ppm("bad_maxval", 42, &pixels);
+
+        let result = check_screen_has_text(&path);
+        let _ = fs::remove_file(path);
+
+        assert!(
+            result.is_err(),
+            "PPM maxval other than 255 must be rejected"
+        );
+    }
+
+    #[test]
+    fn rejects_truncated_ppm_payload() {
+        let mut pixels = kernel_text_pixels();
+        pixels.truncate(SCREEN_WIDTH * 16 * 3);
+        let path = write_ppm("truncated", 255, &pixels);
+
+        let result = check_screen_has_text(&path);
+        let _ = fs::remove_file(path);
+
+        assert!(result.is_err(), "truncated PPM payload must be rejected");
     }
 }
 
@@ -164,7 +324,7 @@ fn test() -> ExitCode {
     // No keystroke injection here: this run is expected to fail before the
     // kernel ever enables interrupts, so there is nothing for it to prove
     // and no benefit to spawning the injector thread.
-    let observed = boot_qemu(&staged, false);
+    let observed = boot_qemu(&staged, false, &screenshot_path());
 
     // Restore before interpreting the result, so a failed boot never leaves
     // a corrupted image staged for the next `cargo xtask run`.
@@ -241,31 +401,59 @@ fn build_and_stage(root: &Path) -> Result<Staged, String> {
 /// afterward — which will not survive later milestones touching this code.
 /// With it, `XTASK_NO_KEYS=1 cargo xtask run` should fail on the kernel's
 /// own keyboard deadline instead.
-fn inject_keystrokes(socket_path: String) {
+fn inject_keystrokes(socket_path: String, screenshot: &Path) -> Result<(), String> {
     // Escape hatch for the negative test: with injection suppressed, the
     // kernel's own keyboard deadline should fire and the run should FAIL.
     // Without this, "the keyboard works" can only be disproved by editing
     // the kernel and reverting it.
     if std::env::var_os("XTASK_NO_KEYS").is_some() {
         eprintln!("note: XTASK_NO_KEYS set — not injecting keystrokes");
-        return;
+        return Ok(());
+    }
+
+    // Wait for QEMU to create the socket.
+    let mut stream = None;
+    for _ in 0..100 {
+        thread::sleep(Duration::from_millis(100));
+        if let Ok(s) = UnixStream::connect(&socket_path) {
+            stream = Some(s);
+            break;
+        }
+    }
+    let Some(mut stream) = stream else {
+        return Err("could not reach the QEMU monitor for screen capture".to_string());
+    };
+
+    let capture_deadline = Instant::now() + SCREEN_CAPTURE_TIMEOUT;
+    loop {
+        match fs::remove_file(screenshot) {
+            Ok(()) => {}
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(format!(
+                    "failed to remove old screen capture {}: {e}",
+                    screenshot.display()
+                ));
+            }
+        }
+        stream
+            .write_all(format!("screendump {}\n", screenshot.display()).as_bytes())
+            .map_err(|e| format!("failed to request screen capture: {e}"))?;
+        thread::sleep(SCREEN_CAPTURE_POLL_INTERVAL);
+
+        match check_screen_has_text(screenshot) {
+            Ok(()) => break,
+            Err(msg) if Instant::now() >= capture_deadline => {
+                return Err(format!(
+                    "kernel framebuffer text did not appear within {}s: {msg}",
+                    SCREEN_CAPTURE_TIMEOUT.as_secs()
+                ));
+            }
+            Err(_) => {}
+        }
     }
 
     thread::spawn(move || {
-        // Wait for QEMU to create the socket.
-        let mut stream = None;
-        for _ in 0..100 {
-            thread::sleep(Duration::from_millis(100));
-            if let Ok(s) = UnixStream::connect(&socket_path) {
-                stream = Some(s);
-                break;
-            }
-        }
-        let Some(mut stream) = stream else {
-            eprintln!("note: could not reach the QEMU monitor; no keys will be injected");
-            return;
-        };
-
         // Keep injecting until the write fails (QEMU exited), which is
         // already the normal way this loop ends — not for a fixed number
         // of sends. The schedule has to outlast the kernel's *deadline*,
@@ -291,6 +479,7 @@ fn inject_keystrokes(socket_path: String) {
             }
         }
     });
+    Ok(())
 }
 
 /// Launch QEMU against the staged ESP and wait for it to exit.
@@ -304,7 +493,7 @@ fn inject_keystrokes(socket_path: String) {
 /// Returns the process exit code, or `None` if QEMU was terminated by a
 /// signal. Interpreting that code is the caller's job — `run` and `test`
 /// expect different ones.
-fn boot_qemu(staged: &Staged, inject: bool) -> Result<Option<i32>, String> {
+fn boot_qemu(staged: &Staged, inject: bool, screenshot: &Path) -> Result<Option<i32>, String> {
     let socket_path = monitor_socket_path();
     let _ = fs::remove_file(&socket_path);
 
@@ -349,7 +538,11 @@ fn boot_qemu(staged: &Staged, inject: bool) -> Result<Option<i32>, String> {
         })?;
 
     if inject {
-        inject_keystrokes(socket_path);
+        if let Err(msg) = inject_keystrokes(socket_path, screenshot) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(msg);
+        }
     }
 
     let deadline = Instant::now() + QEMU_TIMEOUT;
