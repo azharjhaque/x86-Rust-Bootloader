@@ -42,3 +42,18 @@ pub unsafe fn inb(port: u16) -> u8 {
     }
     value
 }
+
+/// Waste a moment on a port nothing uses, to give a slow legacy device time
+/// to latch the previous write.
+///
+/// The 8259 PIC's initialisation sequence needs a brief gap between
+/// command writes on older hardware. Port `0x80` is the POST diagnostic
+/// port: writing to it is harmless and takes roughly the right amount of
+/// time. QEMU does not need this, but the sequence is wrong without it on
+/// real hardware.
+// Not yet called anywhere: the 8259 PIC initialisation that needs this
+// arrives with Milestone 4's Task 3.
+#[allow(dead_code)]
+pub unsafe fn io_wait() {
+    unsafe { outb(0x80, 0) };
+}

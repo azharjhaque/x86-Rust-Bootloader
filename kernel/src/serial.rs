@@ -100,11 +100,17 @@ impl Write for SerialPort {
 /// Backing function for the [`kprint!`] macro. Not called directly.
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
-    // Errors are impossible: `write_byte` cannot fail, so `write_str`
-    // always returns Ok. Ignoring the Result keeps the macro infallible,
-    // which matters because it is used from panic and fault handlers where
-    // there is nothing left to report an error to.
-    let _ = SerialPort.write_fmt(args);
+    // Hold off interrupts for the whole formatted write. Without this, a
+    // handler that prints can preempt a print already in progress and
+    // interleave its bytes into the middle of this one's output — which
+    // becomes possible the moment Milestone 4 enables interrupts.
+    crate::interrupts::without_interrupts(|| {
+        // Errors are impossible: `write_byte` cannot fail, so `write_str`
+        // always returns Ok. Ignoring the Result keeps the macro
+        // infallible, which matters because it is used from panic and
+        // fault handlers where there is nothing left to report an error to.
+        let _ = SerialPort.write_fmt(args);
+    });
 }
 
 /// Print to COM1 without a trailing newline.

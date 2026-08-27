@@ -6,6 +6,7 @@ use boot_info::{BootInfo, PixelFormatKind};
 
 mod gdt;
 mod idt;
+mod interrupts;
 mod port;
 mod qemu_exit;
 mod serial;
