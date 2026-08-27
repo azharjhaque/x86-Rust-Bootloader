@@ -411,7 +411,13 @@ fn boot_qemu(staged: &Staged, inject: bool, screenshot: &Path) -> Result<Option<
         })?;
 
     if inject {
-        inject_keystrokes(socket_path, screenshot)?;
+    if inject {
+        if let Err(msg) = inject_keystrokes(socket_path, screenshot) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(msg);
+        }
+    }
     }
 
     let deadline = Instant::now() + QEMU_TIMEOUT;
