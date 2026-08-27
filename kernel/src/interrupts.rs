@@ -41,11 +41,6 @@ where
 /// Every vector that can now fire must have a handler installed, and those
 /// handlers must be correct. Enabling interrupts with an incomplete IDT
 /// escalates the first IRQ into a double fault.
-// Not yet called anywhere: Milestone 4's PIC/PIT/keyboard work (Task 3) is
-// the first call site. Kept here now, rather than added when first used,
-// because `without_interrupts` above needs a documented `sti` counterpart
-// to restore.
-#[allow(dead_code)]
 pub unsafe fn enable() {
     unsafe { asm!("sti", options(nomem, nostack)) };
 }
@@ -57,9 +52,6 @@ pub unsafe fn enable() {
 /// caller is about to read. Promising `nomem` here would license the
 /// compiler to keep such a value in a register across the halt — the
 /// classic idle-loop miscompile.
-// Not yet called anywhere: the idle loop that uses this arrives with
-// Milestone 4's later tasks, once interrupts are actually enabled.
-#[allow(dead_code)]
 pub fn hlt() {
     unsafe { asm!("hlt", options(nostack)) };
 }

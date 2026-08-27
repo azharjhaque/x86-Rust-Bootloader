@@ -51,9 +51,6 @@ pub unsafe fn inb(port: u16) -> u8 {
 /// port: writing to it is harmless and takes roughly the right amount of
 /// time. QEMU does not need this, but the sequence is wrong without it on
 /// real hardware.
-// Not yet called anywhere: the 8259 PIC initialisation that needs this
-// arrives with Milestone 4's Task 3.
-#[allow(dead_code)]
 pub unsafe fn io_wait() {
     unsafe { outb(0x80, 0) };
 }

@@ -150,6 +150,24 @@ extern "x86-interrupt" fn breakpoint_handler(frame: InterruptStackFrame) {
     );
 }
 
+/// Ticks counted since interrupts were enabled.
+///
+/// `static mut` rather than an atomic because this kernel is single-core
+/// and the only writer is the timer handler, which cannot be preempted by
+/// itself: the IDT gate is an *interrupt* gate, so IF is clear on entry.
+/// Readers use `without_interrupts` to get a torn-free view.
+static mut TICKS: u64 = 0;
+
+/// The number of timer ticks so far.
+pub fn ticks() -> u64 {
+    crate::interrupts::without_interrupts(|| unsafe { TICKS })
+}
+
+extern "x86-interrupt" fn timer_handler(_frame: InterruptStackFrame) {
+    unsafe { TICKS += 1 };
+    unsafe { crate::pic::end_of_interrupt(crate::pic::TIMER_VECTOR) };
+}
+
 /// Print a uniform report for a CPU exception and stop.
 ///
 /// Every fault handler funnels through this so the output format is one
@@ -259,6 +277,7 @@ pub unsafe fn init() {
             double_fault_handler as *const () as u64,
             crate::gdt::DOUBLE_FAULT_IST_INDEX,
         );
+        set_handler(crate::pic::TIMER_VECTOR, timer_handler as *const () as u64);
         load();
     }
 }

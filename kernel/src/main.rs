@@ -7,9 +7,14 @@ use boot_info::{BootInfo, PixelFormatKind};
 mod gdt;
 mod idt;
 mod interrupts;
+mod pic;
+mod pit;
 mod port;
 mod qemu_exit;
 mod serial;
+
+/// Rate the PIT is programmed to interrupt at.
+const TIMER_HZ: u32 = 100;
 
 /// The kernel's entry point, reached by a `jmp` from the bootloader with
 /// `BootInfo` in `rdi` and a stack the bootloader allocated.
@@ -60,7 +65,18 @@ fn kernel_main(info: &BootInfo) -> ! {
         kprintln!("  note: {skipped} pixels skipped as out of bounds");
     }
 
-    kprintln!("kernel initialised");
+    kprintln!("enabling interrupts");
+    unsafe { interrupts::enable() };
+
+    // Wait for the timer to prove itself. If IRQ0 never arrives this loop
+    // never exits, and xtask's 60-second timeout reports the hang — which
+    // is the correct outcome, with the serial trace showing how far we got.
+    const TICKS_REQUIRED: u64 = 100;
+    while idt::ticks() < TICKS_REQUIRED {
+        interrupts::hlt();
+    }
+    kprintln!("timer: {TICKS_REQUIRED} ticks received — IRQ0 works");
+
     qemu_exit::exit(qemu_exit::QemuExitCode::Success)
 }
 
@@ -71,6 +87,12 @@ fn init() {
 
     unsafe { idt::init() };
     kprintln!("IDT loaded");
+
+    unsafe { pic::init() };
+    kprintln!("PICs remapped to vectors {}-{}", pic::PIC1_OFFSET, pic::PIC2_OFFSET + 7);
+
+    unsafe { pit::init(TIMER_HZ) };
+    kprintln!("PIT programmed at {TIMER_HZ} Hz");
 }
 
 /// Boot-time checks that the tables `init` installed actually work.
