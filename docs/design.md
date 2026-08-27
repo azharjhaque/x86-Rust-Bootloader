@@ -177,30 +177,4 @@ Each was built and verified before the next began.
   each, and only reach an idle loop as a side effect of the QEMU exit device
   being absent. Inline echo with shift handling would make it deliberate.
 
-## Decisions that changed
 
-Kept because the reasoning is more useful than the conclusion.
-
-**Custom target JSON, dropped at milestone 2.** The original plan was a
-hand-written target specification. `x86_64-unknown-none` turned out to
-already have the right defaults and ship precompiled core libraries, which
-removed both the JSON and the `build-std` step.
-
-**Per-milestone exit codes, dropped at milestone 3.** The plan was for each
-milestone to signal progress with its own `isa-debug-exit` code. That would
-have required `xtask` to track which milestone was running, for no benefit
-once serial output existed and could carry a readable trace.
-
-**Milestone renumbering, at milestone 5.** Framebuffer text turned out to be
-independent of the allocator, so it became its own milestone rather than
-part of one.
-
-**Hand-rolled allocators, confirmed at milestone 6.** Whether to write both
-allocators or pull in `linked_list_allocator` was left open deliberately.
-Hand-rolled won: the heap's splitting and coalescing is the most instructive
-code in the project, and adding an allocator crate would have undercut the
-premise.
-
-**A screenshot rather than a GIF, at milestone 7.** An animated capture
-needs an LZW encoder and multi-frame timing. A boot trace appearing line by
-line carries no more information than one frame of it does.
