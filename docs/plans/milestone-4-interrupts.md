@@ -773,8 +773,13 @@ git commit -m "Remap the PICs, drive the PIT at 100 Hz, and enable interrupts"
 > any value change. Do not "optimise away" the write on the grounds that the
 > value is already correct; that is precisely the variant that fails.
 >
-> Also worth knowing: one `sendkey a` produces **three** interrupts (make
-> code, break code, and a repeat), so the kernel must tolerate more than one.
+> Also worth knowing: the kernel must tolerate more than one keypress being
+> counted from what looks like a single injected keystroke. This is not
+> because one `sendkey a` itself produces multiple interrupts — it's that
+> `xtask` injects `sendkey a` repeatedly (every 500ms, for as long as QEMU
+> keeps running) rather than once, and the kernel reports whatever has
+> accumulated by the time it first checks. See the `key_events_seen`
+> counter's doc comment in `kernel/src/idt.rs`.
 >
 > Step 1a below adds the controller bring-up. It must run before `sti`.
 

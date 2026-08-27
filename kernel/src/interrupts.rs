@@ -22,14 +22,27 @@ where
     // Bit 9 of RFLAGS is IF, the interrupt-enable flag.
     let was_enabled = (flags & (1 << 9)) != 0;
 
+    // Deliberately *not* `options(nomem)` on either `cli` or `sti` here.
+    // `nomem` tells LLVM the asm block touches no memory, which makes it
+    // free to reorder ordinary loads/stores across it — a store from
+    // inside `f` could sink past the `sti`, or a load from after this
+    // function returns could hoist above the `cli`. Omitting `nomem` makes
+    // each block an implicit compiler barrier (a memory clobber), so `f`'s
+    // accesses are actually ordered to happen inside the critical section
+    // this function claims to provide. That is harmless today — the only
+    // state this protects so far is single aligned-word reads — but this
+    // is the kernel's one critical-section primitive, and Milestone 5's
+    // frame allocator and heap will protect genuinely multi-word state
+    // with exactly this function. Getting the barrier right now avoids a
+    // rare, non-reproducible free-list corruption later.
     if was_enabled {
-        unsafe { asm!("cli", options(nomem, nostack)) };
+        unsafe { asm!("cli", options(nostack)) };
     }
 
     let result = f();
 
     if was_enabled {
-        unsafe { asm!("sti", options(nomem, nostack)) };
+        unsafe { asm!("sti", options(nostack)) };
     }
 
     result

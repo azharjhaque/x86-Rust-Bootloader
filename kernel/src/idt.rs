@@ -160,6 +160,16 @@ extern "x86-interrupt" fn breakpoint_handler(frame: InterruptStackFrame) {
 ///
 /// Returns rather than halting: a spurious IRQ7 is a normal event, not a
 /// bug, and the right response is to acknowledge it and carry on.
+///
+/// The EOI below is unconditional and goes to both chips regardless of
+/// which vector actually landed here. That is not a textbook spurious-IRQ7
+/// handler — a genuine spurious IRQ7 sets no bit in the master's ISR and
+/// architecturally should get *no* EOI at all, since one would falsely
+/// acknowledge whatever real IRQ is next in line. This is safe only because
+/// nesting is impossible right now (only IRQ0 and IRQ1 are unmasked, and
+/// handlers run with IF clear), so there is never a "next IRQ in line" to
+/// clobber. It will need to become vector-aware, and check the ISR before
+/// sending anything, before more lines are unmasked.
 extern "x86-interrupt" fn unhandled_irq_handler(_frame: InterruptStackFrame) {
     // Deliberately silent. This can fire repeatedly (a held key with no
     // driver, a spurious IRQ7), and a print per occurrence would bury the
@@ -179,11 +189,13 @@ extern "x86-interrupt" fn unhandled_irq_handler(_frame: InterruptStackFrame) {
 /// preempted by itself. Readers use `without_interrupts` to get the same
 /// exclusion against a `TICKS += 1` that is mid-flight.
 ///
-/// One caveat: `without_interrupts`'s `cli`/`sti` are `options(nomem)`,
-/// so they are not compiler barriers — the compiler is free to reorder
-/// ordinary memory accesses across them. That is harmless for the single
-/// aligned word read here, but would not be enough on its own to protect
-/// multi-word state; that would need an explicit `compiler_fence` as well.
+/// `without_interrupts`'s `cli`/`sti` deliberately omit `options(nomem)`,
+/// which makes each one a compiler barrier: the compiler cannot reorder
+/// ordinary memory accesses across them. That is what makes `f`'s accesses
+/// actually happen inside the critical section instead of merely inside
+/// the instructions that toggle IF — needed once Milestone 5 protects
+/// multi-word state with this same function, though for the single aligned
+/// word read here it would have been harmless either way.
 static mut TICKS: u64 = 0;
 
 /// The number of timer ticks so far.
@@ -196,17 +208,23 @@ extern "x86-interrupt" fn timer_handler(_frame: InterruptStackFrame) {
     unsafe { crate::pic::end_of_interrupt(crate::pic::TIMER_VECTOR) };
 }
 
-/// Keys received since interrupts were enabled.
+/// Translated key events received since interrupts were enabled.
 ///
 /// Same reasoning as `TICKS` above: single-core, single aligned `u64`, so
 /// the interrupt gate's implicit `cli` on entry is what actually protects
 /// the read-modify-write in `keyboard_handler`, and `without_interrupts`
 /// gives readers the same exclusion.
-static mut KEYS_SEEN: u64 = 0;
+static mut KEY_EVENTS_SEEN: u64 = 0;
 
-/// The number of translatable keypresses received so far.
-pub fn keys_seen() -> u64 {
-    crate::interrupts::without_interrupts(|| unsafe { KEYS_SEEN })
+/// The number of translated key events received so far.
+///
+/// Named "events", not "keypresses" or "presses": this counts every
+/// scancode `keyboard::read_key` successfully translates, with no `0xE0`
+/// extended-code handling and no repeat filtering, so one physical key held
+/// down or one that requires an extended scancode does not map 1:1 to this
+/// count.
+pub fn key_events_seen() -> u64 {
+    crate::interrupts::without_interrupts(|| unsafe { KEY_EVENTS_SEEN })
 }
 
 extern "x86-interrupt" fn keyboard_handler(_frame: InterruptStackFrame) {
@@ -214,7 +232,7 @@ extern "x86-interrupt" fn keyboard_handler(_frame: InterruptStackFrame) {
     // in the controller's output buffer means no further keyboard IRQ ever
     // arrives.
     if let Some(ascii) = unsafe { crate::keyboard::read_key() } {
-        unsafe { KEYS_SEEN += 1 };
+        unsafe { KEY_EVENTS_SEEN += 1 };
         crate::kprintln!("key: {:?}", ascii as char);
     }
     unsafe { crate::pic::end_of_interrupt(crate::pic::KEYBOARD_VECTOR) };
@@ -224,10 +242,20 @@ extern "x86-interrupt" fn keyboard_handler(_frame: InterruptStackFrame) {
 ///
 /// Every fault handler funnels through this so the output format is one
 /// thing rather than N slightly different ones, and so adding a register
-/// dump later is a single edit.
-fn report_fault(name: &str, frame: &InterruptStackFrame, error_code: Option<u64>) -> ! {
+/// dump later is a single edit. `cr2` is the page fault's faulting address,
+/// printed as part of the same report right after the exception name.
+/// Threading it through here (rather than having `page_fault_handler` print
+/// it itself before calling this) keeps the report in the order a reader
+/// expects: previously the caller's own `kprintln!()` header printed CR2
+/// *before* this function's "EXCEPTION: ..." line, so the faulting address
+/// appeared above the name of the exception it belonged to, with stray
+/// blank lines from the two separate headers.
+fn report_fault(name: &str, frame: &InterruptStackFrame, error_code: Option<u64>, cr2: Option<u64>) -> ! {
     crate::kprintln!();
     crate::kprintln!("EXCEPTION: {name}");
+    if let Some(addr) = cr2 {
+        crate::kprintln!("  faulting address (CR2): {addr:#x}");
+    }
     crate::kprintln!("  instruction pointer: {:#x}", frame.instruction_pointer);
     crate::kprintln!("  code segment:        {:#x}", frame.code_segment);
     crate::kprintln!("  cpu flags:           {:#x}", frame.cpu_flags);
@@ -241,18 +269,18 @@ fn report_fault(name: &str, frame: &InterruptStackFrame, error_code: Option<u64>
 }
 
 extern "x86-interrupt" fn divide_error_handler(frame: InterruptStackFrame) -> ! {
-    report_fault("divide error (#DE)", &frame, None)
+    report_fault("divide error (#DE)", &frame, None, None)
 }
 
 extern "x86-interrupt" fn invalid_opcode_handler(frame: InterruptStackFrame) -> ! {
-    report_fault("invalid opcode (#UD)", &frame, None)
+    report_fault("invalid opcode (#UD)", &frame, None, None)
 }
 
 extern "x86-interrupt" fn general_protection_handler(
     frame: InterruptStackFrame,
     error_code: u64,
 ) -> ! {
-    report_fault("general protection fault (#GP)", &frame, Some(error_code))
+    report_fault("general protection fault (#GP)", &frame, Some(error_code), None)
 }
 
 /// Page faults also set CR2 to the offending address. Reading it is the
@@ -261,9 +289,7 @@ extern "x86-interrupt" fn general_protection_handler(
 extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, error_code: u64) -> ! {
     let cr2: u64;
     unsafe { core::arch::asm!("mov {}, cr2", out(reg) cr2, options(nomem, nostack, preserves_flags)) };
-    crate::kprintln!();
-    crate::kprintln!("  faulting address (CR2): {cr2:#x}");
-    report_fault("page fault (#PF)", &frame, Some(error_code))
+    report_fault("page fault (#PF)", &frame, Some(error_code), Some(cr2))
 }
 
 /// Vector 8, raised when the CPU fails to deliver an earlier exception —

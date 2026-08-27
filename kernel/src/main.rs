@@ -55,7 +55,10 @@ fn kernel_main(info: &BootInfo) -> ! {
     );
     kprintln!("kernel image: base={:#x} size={:#x}", info.kernel_base, info.kernel_size);
 
-    init();
+    // SAFETY: this is the one and only call, made here in `kernel_main`
+    // before anything enables interrupts — see `init`'s own `# Safety`
+    // section for why interrupts are already off at this point.
+    unsafe { init() };
     selftest();
 
     let (skipped, fell_back) = fill_screen(info, 0x00, 0x33, 0x99);
@@ -86,20 +89,32 @@ fn kernel_main(info: &BootInfo) -> ! {
     // serviceable clock.
     kprintln!("waiting for a keypress...");
     let deadline = idt::ticks() + TIMER_HZ as u64 * 10;
-    while idt::keys_seen() == 0 {
+    while idt::key_events_seen() == 0 {
         if idt::ticks() > deadline {
             kprintln!("keyboard: no input within 10s — IRQ1 is not delivering");
             qemu_exit::exit(qemu_exit::QemuExitCode::Failed);
         }
         interrupts::hlt();
     }
-    kprintln!("keyboard: {} keypress(es) received — IRQ1 works", idt::keys_seen());
+    kprintln!("keyboard: {} key event(s) received — IRQ1 works", idt::key_events_seen());
 
     qemu_exit::exit(qemu_exit::QemuExitCode::Success)
 }
 
-/// One-time CPU and device setup.
-fn init() {
+/// One-time CPU and device setup: installs the GDT/TSS, the IDT, remaps
+/// the PICs, programs the PIT, and brings up the 8042 controller.
+///
+/// # Safety
+/// Must be called exactly once, from `kernel_main`, before interrupts are
+/// enabled. Every function this calls documents "call once, with
+/// interrupts disabled" as its own precondition; nothing here enforces the
+/// "once" half, and the "interrupts disabled" half holds only because it
+/// is true on entry to `kernel_main` — which itself is true only because
+/// `bootloader/src/handoff.rs` executes `cli` before jumping into the
+/// kernel. That `cli`, in a different binary entirely, is the actual
+/// load-bearing precondition for this whole function; nothing on this side
+/// of the jump can check it, so it is recorded here instead.
+unsafe fn init() {
     unsafe { gdt::init() };
     kprintln!("GDT + TSS loaded (code selector {:#x})", gdt::KERNEL_CODE_SELECTOR);
 

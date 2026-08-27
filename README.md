@@ -85,11 +85,12 @@ progress on the same serial console via a COM1 driver, so its output now
 appears right after the bootloader's handing off to kernel line.
 
 `xtask` also drives the keyboard test: once QEMU is up it connects to
-QEMU's monitor socket and injects `sendkey a` a few times over the following
-seconds, which is what lets `cargo xtask run` prove the keyboard IRQ works
-with no human present. Running `qemu-system-x86_64` by hand instead (with a
-display attached) works the same way, except you type the keystroke
-yourself.
+QEMU's monitor socket and injects `sendkey a` repeatedly, every 500ms, for
+as long as QEMU keeps running (or until a generous backstop expires) —
+which is what lets `cargo xtask run` prove the keyboard IRQ works with no
+human present, on hosts slow enough that boot alone eats several seconds.
+Running `qemu-system-x86_64` by hand instead (with a display attached)
+works the same way, except you type the keystroke yourself.
 
 The kernel's own trace — everything from here on is the kernel, not the
 bootloader — looks like this:
@@ -111,24 +112,34 @@ key: 'a'
 key: 'a'
 timer: 100 ticks received — IRQ0 works
 waiting for a keypress...
-keyboard: 2 keypress(es) received — IRQ1 works
+keyboard: 2 key event(s) received — IRQ1 works
 PASS: bootloader exited with expected code 33
 ```
 
 Two things worth noting about this trace: the `key: 'a'` lines can appear
 *before* the `timer: 100 ticks` line, because `xtask` starts sending
 keystrokes on its own schedule as soon as QEMU's monitor socket exists,
-independent of how far the kernel has gotten. And `keyboard: 2 keypress(es)`
-from a single injected `sendkey a` is expected, not a double-count: QEMU's
-`sendkey` produces a make code, a key-repeat, and a break code on real
-hardware timing, and the keyboard driver counts every make/repeat while
-ignoring the break (bit 7 set) — so one injected keystroke can register as
-more than one.
+independent of how far the kernel has gotten. And the exact
+`keyboard: N key event(s)` count is timing-dependent, not a fixed number:
+`xtask` injects `sendkey a` repeatedly (every 500ms, for as long as QEMU
+keeps running), and the kernel reports whatever has accumulated by the time
+it first checks — so seeing more than one event from what looks like "one
+keystroke" just means more than one injection had already landed.
 
 The `PASS` line only appears once both IRQ0 (timer) and IRQ1 (keyboard) have
 been proven live. A dead timer hangs until `xtask`'s 60-second timeout
 reports a boot hang; a dead keyboard reports itself after a bounded 10-second
 wait and exits with the failure code instead.
+
+The double-fault handler from Milestone 3 is still installed as the
+safety net — vector 8 in the IDT still runs on its own IST stack — but it
+no longer appears in this trace. Milestone 3 could afford to provoke one
+deliberately on every boot, as the kernel had nothing left to do
+afterward; this milestone's kernel has to keep running to service IRQ0 and
+IRQ1, so nothing in the current boot path triggers a fault on purpose any
+more. Milestone 5's stack guard page will make a genuine stack-overflow
+double fault happen naturally, at which point this handler becomes
+testable again rather than just present.
 
 ## Testing the failure path
 

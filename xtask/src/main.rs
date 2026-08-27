@@ -25,7 +25,17 @@ const QEMU_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Where QEMU's monitor socket lives. `xtask` connects to this to inject
 /// keystrokes, which is how the keyboard IRQ gets tested without a human.
-const MONITOR_SOCKET: &str = "/tmp/rust_bl_monitor.sock";
+///
+/// Includes this process's pid so two concurrent `cargo xtask` runs don't
+/// collide on the same path: without that, the second run's
+/// `fs::remove_file` (whose error is deliberately ignored, since "the file
+/// doesn't exist yet" is the common case) could remove the *first* run's
+/// live socket, or the second QEMU could simply fail to bind a path still
+/// held by the first — either way degrading silently into a confusing
+/// keyboard-injection failure instead of a clear error.
+fn monitor_socket_path() -> String {
+    format!("/tmp/rust_bl_monitor_{}.sock", std::process::id())
+}
 
 const USAGE: &str = "Usage:
   cargo xtask run     Build, stage the ESP, and boot in QEMU (expects exit 33)
@@ -71,7 +81,7 @@ fn run() -> ExitCode {
         }
     };
 
-    let observed = match boot_qemu(&staged) {
+    let observed = match boot_qemu(&staged, true) {
         Ok(code) => code,
         Err(msg) => {
             eprintln!("FAIL: {msg}");
@@ -151,7 +161,10 @@ fn test() -> ExitCode {
     }
 
     println!("corrupted the staged kernel's ELF magic; booting...");
-    let observed = boot_qemu(&staged);
+    // No keystroke injection here: this run is expected to fail before the
+    // kernel ever enables interrupts, so there is nothing for it to prove
+    // and no benefit to spawning the injector thread.
+    let observed = boot_qemu(&staged, false);
 
     // Restore before interpreting the result, so a failed boot never leaves
     // a corrupted image staged for the next `cargo xtask run`.
@@ -216,16 +229,34 @@ fn build_and_stage(root: &Path) -> Result<Staged, String> {
 ///
 /// Spawned on its own thread because QEMU is running concurrently: the
 /// keystrokes have to arrive *after* the kernel has enabled interrupts, and
-/// there is no signal for that other than time. Sending several spread out
-/// over a few seconds is simpler and more robust than trying to synchronise,
-/// and the kernel only needs one to arrive.
-fn inject_keystrokes() {
-    thread::spawn(|| {
+/// there is no signal for that other than time. Sending repeatedly is
+/// simpler and more robust than trying to synchronise, and the kernel only
+/// needs one to arrive.
+///
+/// # Escape hatch
+/// Setting `XTASK_NO_KEYS` skips injection entirely. This exists so the
+/// keyboard path has a negative test: without it, the only way to prove
+/// injected keystrokes (as opposed to something else) are what the kernel
+/// sees is to manually edit the kernel to stop counting them and revert it
+/// afterward — which will not survive later milestones touching this code.
+/// With it, `XTASK_NO_KEYS=1 cargo xtask run` should fail on the kernel's
+/// own keyboard deadline instead.
+fn inject_keystrokes(socket_path: String) {
+    // Escape hatch for the negative test: with injection suppressed, the
+    // kernel's own keyboard deadline should fire and the run should FAIL.
+    // Without this, "the keyboard works" can only be disproved by editing
+    // the kernel and reverting it.
+    if std::env::var_os("XTASK_NO_KEYS").is_some() {
+        eprintln!("note: XTASK_NO_KEYS set — not injecting keystrokes");
+        return;
+    }
+
+    thread::spawn(move || {
         // Wait for QEMU to create the socket.
         let mut stream = None;
         for _ in 0..100 {
             thread::sleep(Duration::from_millis(100));
-            if let Ok(s) = UnixStream::connect(MONITOR_SOCKET) {
+            if let Ok(s) = UnixStream::connect(&socket_path) {
                 stream = Some(s);
                 break;
             }
@@ -235,9 +266,23 @@ fn inject_keystrokes() {
             return;
         };
 
-        // The kernel spends about a second counting timer ticks before it
-        // starts looking for input, so start after that and keep going.
-        for _ in 0..10 {
+        // Keep injecting until the write fails (QEMU exited), which is
+        // already the normal way this loop ends — not for a fixed number
+        // of sends. The schedule has to outlast the kernel's *deadline*,
+        // not just its timer wait: the kernel only starts counting
+        // keystrokes from `sti` onward (anything earlier is dropped by
+        // `ps2::init`'s drain) and reports failure roughly 11s after that
+        // (1s of timer ticks, then a 10s keyboard wait). On a loaded or
+        // slow host, OVMF boot + the bootloader + kernel init can itself
+        // eat several seconds *before* `sti` ever runs, so a short,
+        // time-bounded injection schedule can finish sending before the
+        // kernel is even listening — every injected key lands too early,
+        // gets silently dropped, and the run fails with "no input within
+        // 10s" even though nothing is actually broken. The `0..40` bound
+        // (20s) is purely a backstop against a wedged QEMU that never
+        // exits on its own; in a healthy run this loop always ends via the
+        // write failing, well before the bound is reached.
+        for _ in 0..40 {
             thread::sleep(Duration::from_millis(500));
             if stream.write_all(b"sendkey a\n").is_err() {
                 // QEMU exited — the run is over, which is the normal way
@@ -250,11 +295,18 @@ fn inject_keystrokes() {
 
 /// Launch QEMU against the staged ESP and wait for it to exit.
 ///
+/// `inject` controls whether the keystroke-injection thread is started at
+/// all: `run` needs it to prove the keyboard IRQ works, but `test` boots a
+/// deliberately-corrupted image that is expected to fail before the kernel
+/// ever enables interrupts, so spawning an injector for it would be pure
+/// overhead with nothing to prove.
+///
 /// Returns the process exit code, or `None` if QEMU was terminated by a
 /// signal. Interpreting that code is the caller's job — `run` and `test`
 /// expect different ones.
-fn boot_qemu(staged: &Staged) -> Result<Option<i32>, String> {
-    let _ = fs::remove_file(MONITOR_SOCKET);
+fn boot_qemu(staged: &Staged, inject: bool) -> Result<Option<i32>, String> {
+    let socket_path = monitor_socket_path();
+    let _ = fs::remove_file(&socket_path);
 
     let mut child = Command::new("qemu-system-x86_64")
         .arg("-drive")
@@ -288,7 +340,7 @@ fn boot_qemu(staged: &Staged) -> Result<Option<i32>, String> {
         .arg("-serial")
         .arg("stdio")
         .arg("-monitor")
-        .arg(format!("unix:{MONITOR_SOCKET},server,nowait"))
+        .arg(format!("unix:{socket_path},server,nowait"))
         .spawn()
         .map_err(|e| {
             format!(
@@ -296,7 +348,9 @@ fn boot_qemu(staged: &Staged) -> Result<Option<i32>, String> {
             )
         })?;
 
-    inject_keystrokes();
+    if inject {
+        inject_keystrokes(socket_path);
+    }
 
     let deadline = Instant::now() + QEMU_TIMEOUT;
     let status = loop {

@@ -23,34 +23,92 @@ const CONFIG_FIRST_PORT_INTERRUPT: u8 = 0x01;
 /// Configuration bit 4: *disable* the first port's clock. Must be clear.
 const CONFIG_FIRST_PORT_CLOCK_DISABLED: u8 = 0x10;
 
-/// Spin until the controller can accept a write.
-unsafe fn wait_writable() {
-    while unsafe { inb(STATUS) } & STATUS_INPUT_FULL != 0 {}
+/// Iteration budget for every spin below. This all runs before `sti`, with
+/// no timer tick available to bound a wait by, so each loop caps itself on
+/// iteration count instead.
+///
+/// On a machine with no 8042 at all (common on modern UEFI-only laptops;
+/// reproducible under QEMU with `-machine ...,i8042=off`), port `0x64`
+/// reads back `0xFF`: both status bits appear permanently set, so an
+/// unbounded "wait for input-empty" or "wait for output-full" loop spins
+/// forever and interrupts are never enabled — a silent hang before the
+/// kernel has any way to report one, with the harness's 60s timeout then
+/// blaming whatever the last `kprintln!` happened to be (`PIT programmed at
+/// 100 Hz`), not the 8042. A few hundred thousand iterations is ample time
+/// for real hardware/firmware to respond, and still resolves promptly when
+/// there is nothing to wait for.
+const SPIN_BUDGET: u32 = 200_000;
+
+/// Spin until the controller can accept a write, or the budget runs out.
+///
+/// Returns `true` if the controller became writable, `false` on timeout.
+unsafe fn wait_writable() -> bool {
+    for _ in 0..SPIN_BUDGET {
+        if unsafe { inb(STATUS) } & STATUS_INPUT_FULL == 0 {
+            return true;
+        }
+    }
+    false
 }
 
-/// Spin until the controller has a byte for us.
-unsafe fn wait_readable() {
-    while unsafe { inb(STATUS) } & STATUS_OUTPUT_FULL == 0 {}
+/// Spin until the controller has a byte for us, or the budget runs out.
+///
+/// Returns `true` if a byte became available, `false` on timeout.
+unsafe fn wait_readable() -> bool {
+    for _ in 0..SPIN_BUDGET {
+        if unsafe { inb(STATUS) } & STATUS_OUTPUT_FULL != 0 {
+            return true;
+        }
+    }
+    false
 }
 
 /// Initialise the controller so keystrokes raise IRQ1.
+///
+/// Never hangs: every wait below is bounded, and on timeout this reports
+/// which step failed via `kprintln!` and returns rather than spinning
+/// forever. The kernel is already prepared for the keyboard never working —
+/// `kernel_main`'s keyboard deadline reports that cleanly — so degrading
+/// here instead of completing initialisation costs nothing beyond that same,
+/// already-handled failure mode, and turns a mystery boot hang into a named
+/// diagnostic.
 ///
 /// # Safety
 /// Call once, with interrupts disabled, before `sti`.
 pub unsafe fn init() {
     unsafe {
         // Firmware may have left a byte unread. The controller will not
-        // signal again while its output buffer is full, so drain it.
-        while inb(STATUS) & STATUS_OUTPUT_FULL != 0 {
+        // signal again while its output buffer is full, so drain it —
+        // bounded too, since a controllerless machine reads STATUS as
+        // 0xFF and would otherwise never see the empty bit.
+        let mut drained = false;
+        for _ in 0..SPIN_BUDGET {
+            if inb(STATUS) & STATUS_OUTPUT_FULL == 0 {
+                drained = true;
+                break;
+            }
             let _ = inb(DATA);
         }
+        if !drained {
+            crate::kprintln!("ps2: timed out draining the output buffer; no 8042 present?");
+            return;
+        }
 
-        wait_writable();
+        if !wait_writable() {
+            crate::kprintln!("ps2: timed out waiting to enable the first port");
+            return;
+        }
         outb(COMMAND, CMD_ENABLE_FIRST_PORT);
 
-        wait_writable();
+        if !wait_writable() {
+            crate::kprintln!("ps2: timed out waiting to request the config byte");
+            return;
+        }
         outb(COMMAND, CMD_READ_CONFIG);
-        wait_readable();
+        if !wait_readable() {
+            crate::kprintln!("ps2: timed out waiting to read the config byte");
+            return;
+        }
         let mut config = inb(DATA);
 
         config |= CONFIG_FIRST_PORT_INTERRUPT;
@@ -60,9 +118,15 @@ pub unsafe fn init() {
         // already reads back correct, and writing it anyway is what makes
         // the controller actually deliver interrupts — verified by testing
         // the variant that skips this, which does not work.
-        wait_writable();
+        if !wait_writable() {
+            crate::kprintln!("ps2: timed out waiting to write the config byte command");
+            return;
+        }
         outb(COMMAND, CMD_WRITE_CONFIG);
-        wait_writable();
+        if !wait_writable() {
+            crate::kprintln!("ps2: timed out waiting to write the config byte");
+            return;
+        }
         outb(DATA, config);
     }
 }
