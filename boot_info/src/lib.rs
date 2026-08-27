@@ -105,7 +105,7 @@ impl FrameBufferInfo {
 pub struct MemoryRegion {
     pub start: u64,
     pub pages: u64,
-    /// The raw UEFI `MemoryType` value. Milestone 5's frame allocator
+    /// The raw UEFI `MemoryType` value. Milestone 6's frame allocator
     /// cares about `7` (`CONVENTIONAL`); everything else is reserved for
     /// now.
     pub kind: u32,
@@ -121,6 +121,79 @@ impl MemoryRegion {
 
     pub const fn is_usable(&self) -> bool {
         self.kind == Self::CONVENTIONAL
+    }
+}
+
+/// The only page size this project deals in. UEFI reports region sizes in
+/// units of this, and the kernel's frame allocator hands out exactly this.
+pub const PAGE_SIZE: u64 = 4096;
+
+/// A contiguous, page-aligned span of physical memory that is free for the
+/// kernel to use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameRun {
+    pub start: u64,
+    pub frames: u64,
+}
+
+/// Iterator over the usable, page-aligned runs of a UEFI memory map.
+///
+/// This is deliberately pure — no raw pointers, no statics, no `unsafe` —
+/// so that the fiddly half of the frame allocator (which region survives,
+/// where does it start, how many whole frames does it really contain) is
+/// testable on the host, where a mistake is a red test rather than a
+/// triple fault with no logger left to report it.
+#[derive(Clone, Copy, Debug)]
+pub struct UsableRegions<'a> {
+    regions: &'a [MemoryRegion],
+    index: usize,
+}
+
+impl<'a> UsableRegions<'a> {
+    pub const fn new(regions: &'a [MemoryRegion]) -> Self {
+        Self { regions, index: 0 }
+    }
+}
+
+impl Iterator for UsableRegions<'_> {
+    type Item = FrameRun;
+
+    fn next(&mut self) -> Option<FrameRun> {
+        while self.index < self.regions.len() {
+            let region = self.regions[self.index];
+            self.index += 1;
+
+            if !region.is_usable() {
+                continue;
+            }
+
+            // This data crossed a binary boundary and is not trusted. A
+            // descriptor whose span overflows is skipped rather than
+            // wrapped around into a bogus low run.
+            let Some(span) = region.pages.checked_mul(PAGE_SIZE) else {
+                continue;
+            };
+            let Some(end) = region.start.checked_add(span) else {
+                continue;
+            };
+
+            // Never yield the frame at physical 0. Downstream the frame
+            // address becomes a `NonNull`, and a null frame would make
+            // "no frame" and "the first frame" indistinguishable.
+            let Some(start) = region.start.max(PAGE_SIZE).checked_next_multiple_of(PAGE_SIZE)
+            else {
+                continue;
+            };
+            let end = end - (end % PAGE_SIZE);
+
+            // Rounding inward can consume the whole region.
+            if end <= start {
+                continue;
+            }
+
+            return Some(FrameRun { start, frames: (end - start) / PAGE_SIZE });
+        }
+        None
     }
 }
 
@@ -196,3 +269,77 @@ impl BootInfo {
 const _: () = assert!(size_of::<BootInfo>() == 88);
 const _: () = assert!(size_of::<FrameBufferInfo>() == 40);
 const _: () = assert!(size_of::<MemoryRegion>() == 24);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A UEFI type that is not CONVENTIONAL. 2 is LOADER_DATA, which is
+    /// exactly what the bootloader marks the kernel image, stack, and
+    /// `BootInfo` as — so this is the case that keeps the allocator from
+    /// handing out memory the kernel is still running on.
+    const LOADER_DATA: u32 = 2;
+
+    #[test]
+    fn skips_regions_that_are_not_conventional() {
+        let regions = [
+            MemoryRegion::new(0x1000, 4, LOADER_DATA),
+            MemoryRegion::new(0x5000, 4, MemoryRegion::CONVENTIONAL),
+        ];
+        let mut runs = UsableRegions::new(&regions);
+        assert_eq!(runs.next(), Some(FrameRun { start: 0x5000, frames: 4 }));
+        assert_eq!(runs.next(), None);
+    }
+
+    #[test]
+    fn never_yields_the_frame_at_physical_zero() {
+        // A run starting at 0 must be trimmed to start at 0x1000, so an
+        // allocated frame address is never null.
+        let regions = [MemoryRegion::new(0, 2, MemoryRegion::CONVENTIONAL)];
+        let mut runs = UsableRegions::new(&regions);
+        assert_eq!(runs.next(), Some(FrameRun { start: 0x1000, frames: 1 }));
+        assert_eq!(runs.next(), None);
+    }
+
+    #[test]
+    fn clamps_an_unaligned_span_inward() {
+        // 0x1800..0x3800 contains exactly one whole aligned frame.
+        let regions = [MemoryRegion::new(0x1800, 2, MemoryRegion::CONVENTIONAL)];
+        let mut runs = UsableRegions::new(&regions);
+        assert_eq!(runs.next(), Some(FrameRun { start: 0x2000, frames: 1 }));
+        assert_eq!(runs.next(), None);
+    }
+
+    #[test]
+    fn drops_a_span_that_rounds_away_to_nothing() {
+        // 0x1800..0x2800 straddles a boundary but contains no whole frame.
+        let regions = [MemoryRegion::new(0x1800, 1, MemoryRegion::CONVENTIONAL)];
+        assert_eq!(UsableRegions::new(&regions).next(), None);
+    }
+
+    #[test]
+    fn yields_every_usable_region_in_order() {
+        let regions = [
+            MemoryRegion::new(0x2000, 3, MemoryRegion::CONVENTIONAL),
+            MemoryRegion::new(0x9000, 1, LOADER_DATA),
+            MemoryRegion::new(0xa000, 2, MemoryRegion::CONVENTIONAL),
+        ];
+        let mut runs = UsableRegions::new(&regions);
+        assert_eq!(runs.next(), Some(FrameRun { start: 0x2000, frames: 3 }));
+        assert_eq!(runs.next(), Some(FrameRun { start: 0xa000, frames: 2 }));
+        assert_eq!(runs.next(), None);
+    }
+
+    #[test]
+    fn an_empty_map_yields_nothing() {
+        assert_eq!(UsableRegions::new(&[]).next(), None);
+    }
+
+    #[test]
+    fn skips_a_descriptor_whose_span_overflows() {
+        // A malformed descriptor must be skipped, not trusted and not
+        // panicked on: this data crosses a binary boundary.
+        let regions = [MemoryRegion::new(u64::MAX - 0xfff, u64::MAX, MemoryRegion::CONVENTIONAL)];
+        assert_eq!(UsableRegions::new(&regions).next(), None);
+    }
+}
