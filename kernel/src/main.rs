@@ -2,12 +2,17 @@
 #![no_main]
 #![feature(abi_x86_interrupt)]
 
+extern crate alloc;
+
 use boot_info::{BootInfo, PixelFormatKind, PAGE_SIZE};
+
+use heap::HEAP_FRAMES;
 
 mod console;
 mod font;
 mod frame;
 mod gdt;
+mod heap;
 mod idt;
 mod interrupts;
 mod keyboard;
@@ -101,6 +106,21 @@ fn kernel_main(info: &'static BootInfo) -> ! {
         qemu_exit::exit(qemu_exit::QemuExitCode::Failed);
     }
     kprintln!("frame allocator: selftest passed");
+
+    let Some((heap_start, heap_size)) = heap::init() else {
+        kprintln!("FATAL: could not obtain {HEAP_FRAMES} contiguous frames for the heap");
+        qemu_exit::exit(qemu_exit::QemuExitCode::Failed);
+    };
+    kprintln!(
+        "heap: {} KiB @ {heap_start:#x} ({} of {total_frames} frames in use)",
+        heap_size / 1024,
+        frame::frames_in_use()
+    );
+    if let Err(reason) = heap::selftest() {
+        kprintln!("FATAL: heap selftest: {reason}");
+        qemu_exit::exit(qemu_exit::QemuExitCode::Failed);
+    }
+    kprintln!("alloc: Box/Vec/String OK, heap balanced");
 
     kprintln!("enabling interrupts");
     unsafe { interrupts::enable() };

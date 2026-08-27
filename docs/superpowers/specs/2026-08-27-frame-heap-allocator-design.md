@@ -127,25 +127,40 @@ struct FreeBlock { size: usize, next: Option<NonNull<FreeBlock>> }  // 16 bytes
 An address-ordered singly linked list of free blocks, each block's header
 stored inside the block itself.
 
+**The 16-byte grid.** Every block start and every block size is a multiple
+of 16. The backing memory is frame-aligned, requested sizes are rounded up,
+and requested alignments are raised to at least 16 — and a power-of-two
+alignment of 16 or more maps a 16-aligned address to a 16-aligned address.
+So the front padding and tail remainder of any carve are themselves
+multiples of 16: each is either exactly zero, or large enough to be a whole
+`FreeBlock`.
+
+This is a correction made during implementation. The original plan was that
+front padding smaller than 16 bytes would be "absorbed into the allocation",
+which cannot work: `dealloc` receives only the payload pointer and the
+layout, so an absorbed prefix is unrecoverable and would leak on every such
+allocation. The grid makes that case impossible rather than something to
+handle.
+
 - `init(start, size)`: one block spanning the whole 1 MiB.
 - `alloc(layout)`: first fit. Within a candidate block, compute the aligned
-  start for `layout.align()`. Front padding becomes its own free block when
-  it is at least 16 bytes, and is otherwise absorbed into the allocation.
-  The tail splits off on the same threshold. Every request is rounded up to
-  at least `size_of::<FreeBlock>()` and to `align_of::<FreeBlock>()`, so any
-  block can host a header once freed.
+  start for `layout.align()`; the front becomes its own free block when
+  non-zero, and the tail splits off when non-zero. On the grid, "non-zero"
+  and "at least a whole header" are the same condition.
 - `dealloc(ptr, layout)`: insert in address order, then merge with the
   previous and next neighbours when physically adjacent. Both directions —
   this is what keeps repeated `Vec` doubling from fragmenting the heap into
   unusable slivers.
-- `free_bytes()`: walk and sum. Exists so the selftest can assert the heap
-  returns to its exact starting value, which only happens if coalescing is
-  correct.
+- `free_bytes()`: walk and sum. Detects a *leak*.
+- `free_blocks()`: walk and count. Detects a *coalescing failure*. These are
+  genuinely different faults and only the second check sees the second one —
+  see the Testing section.
 
-The `#[global_allocator]` is a unit struct whose `alloc`/`dealloc` wrap the
-list walk in `interrupts::without_interrupts`. Its `unsafe impl Sync` safety
-comment cites that critical section — an accurate claim about code, not a
-promise about future discipline.
+The `#[global_allocator]` is a unit struct, and therefore already `Sync`
+with no unsafe assertion needed — a second correction made during
+implementation, where the plan had called for an `unsafe impl Sync`. All the
+shared state lives in the `static mut HEAP`, and every access to it goes
+through `interrupts::without_interrupts`.
 
 ### Heap sizing and placement
 
@@ -210,8 +225,17 @@ required by this milestone.**
      intrusive free stack)
    - `Vec<u64>` pushed past several reallocations holds the right values
    - `Box` and `String` round-trip
-   - `free_bytes()` returns to its exact pre-test value (proves
-     bidirectional coalescing)
+   - `free_bytes()` returns to its exact pre-test value (proves nothing
+     leaked)
+   - `free_blocks()` returns to 1 (proves bidirectional coalescing)
+
+   The last two are not redundant, and the distinction was got wrong first
+   time. Total free bytes are **conserved whether or not neighbours merge**:
+   a heap that split correctly and never coalesced would fragment into a
+   chain of slivers summing to exactly the right total and sail through the
+   byte-balance check. Only the block count falling back to one shows that
+   merging happened. Verified by mutation: disabling both merge paths makes
+   the block-count assertion fire while the byte balance stays silent.
 3. **Existing suite must stay green, unchanged**: `cargo test -p xtask`
    (3 tests), `cargo xtask run` (exit 33 plus the glyph assertion),
    `cargo xtask test` (exit 35).
