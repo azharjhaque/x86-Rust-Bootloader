@@ -4,6 +4,8 @@
 
 use boot_info::{BootInfo, PixelFormatKind};
 
+#[expect(dead_code)]
+mod font;
 mod gdt;
 mod idt;
 mod interrupts;
