@@ -139,17 +139,24 @@ tests on). Verification is:
 
 ## Milestones
 
+~~The original sequence put framebuffer text rendering in Milestone 4, the
+allocator in Milestone 5, and polish in Milestone 6.~~ Resolved during
+Milestone 5: framebuffer text rendering is independent of the allocator, so
+it became its own completed Milestone 5; the allocator is Milestone 6 and
+polish is Milestone 7.
+
 These map directly to the implementation plan phases:
 
 1. Workspace scaffold + `xtask` that builds an empty `.efi` and boots it in
    QEMU/OVMF (proves the toolchain end-to-end before any real logic).
 2. Bootloader: ELF loader + UEFI memory map + GOP framebuffer acquisition +
-   `exit_boot_services` + jump to a kernel stub that writes one pixel.
+   exit_boot_services + jump to a kernel stub that writes one pixel.
 3. Kernel: GDT + IDT + double-fault handler.
-4. Kernel: PIT timer interrupt + PS/2 keyboard interrupt + framebuffer text
-   rendering.
-5. Kernel: physical frame allocator + heap allocator, prove `alloc` works.
-6. Polish: README with build/run instructions, screenshot/GIF of it booting,
+4. Kernel: PIT timer interrupt + PS/2 keyboard interrupt.
+5. Kernel: framebuffer text rendering, including serial fan-out and an
+   automated framebuffer capture assertion.
+6. Kernel: physical frame allocator + heap allocator, prove `alloc` works.
+7. Polish: README with build/run instructions, screenshot/GIF of it booting,
    short write-up of what was implemented (this is the artifact that
    actually gets shown on a resume/portfolio).
 
@@ -157,7 +164,7 @@ These map directly to the implementation plan phases:
 
 - Hand-rolled bump/free-list heap allocator vs. pulling in
   `linked_list_allocator`: leaning hand-rolled for resume value, final call
-  can be made during milestone 5 without affecting earlier milestones.
+  can be made during milestone 6 without affecting earlier milestones.
 - ~~Exact custom target JSON contents will be worked out at milestone 1
   against whatever current nightly requires (these flags shift across Rust
   versions).~~ Resolved during milestone 2: no custom target JSON exists;

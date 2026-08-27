@@ -90,8 +90,10 @@ impl Write for SerialPort {
             // Terminals expect CRLF; Rust strings carry bare LF.
             if byte == b'\n' {
                 write_byte(b'\r');
+                crate::console::write_byte(b'\r');
             }
             write_byte(byte);
+            crate::console::write_byte(byte);
         }
         Ok(())
     }

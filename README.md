@@ -8,14 +8,12 @@ rather than delegated to an existing library, milestone by milestone.
 
 ## Status
 
-✅ Milestone 4 of 6 complete and verified: the kernel responds to the
-outside world. The two 8259 PICs are remapped off the CPU's own exception
-vectors, the PIT drives a 100 Hz timer tick, the 8042 PS/2 controller is
-brought up and its keyboard IRQ enabled, and a catch-all handler covers
-every remapped PIC vector so no unmasked IRQ can ever land on a non-present
-gate. `xtask` proves the keyboard path automatically by injecting a
-keystroke through QEMU's monitor, so the whole run needs no human at the
-keyboard.
+Milestone 5 of 7 is complete and verified: the kernel now mirrors its boot
+trace to the framebuffer as well as COM1. The console draws glyphs directly
+onto the blue GOP surface, while xtask captures the kernel's 1280x800 screen
+and rejects a flat image. The existing 8259 PIC, PIT, and PS/2 keyboard
+checks remain automated, so the full boot trace is visible on machines
+without a serial port as well as in QEMU.
 
 See [docs/design.md](docs/design.md) for the full design, and
 [docs/plans/](docs/plans/) for implementation plans per milestone.
@@ -25,11 +23,10 @@ See [docs/design.md](docs/design.md) for the full design, and
 - [x] 1. Toolchain bootstrap — empty UEFI app boots in QEMU/OVMF
 - [x] 2. Bootloader: ELF loader, memory map, framebuffer, handoff to kernel
 - [x] 3. Kernel: GDT, IDT, double-fault handler
-- [x] 4. Kernel: PIT timer + PS/2 keyboard interrupts (framebuffer text
-      rendering deferred to Milestone 6 — see
-      [docs/plans/milestone-4-interrupts.md](docs/plans/milestone-4-interrupts.md))
-- [ ] 5. Kernel: physical frame allocator + heap allocator
-- [ ] 6. Polish: docs, screenshots/GIF, write-up
+- [x] 4. Kernel: PIT timer + PS/2 keyboard interrupts
+- [x] 5. Kernel: framebuffer text rendering and serial fan-out
+- [ ] 6. Kernel: physical frame allocator + heap allocator
+- [ ] 7. Polish: docs, screenshots/GIF, write-up
 
 ## Repository layout
 
@@ -73,16 +70,14 @@ cd Rust_BL
 cargo xtask run
 ```
 
-This builds the bootloader and the kernel, stages an EFI System Partition
-directory (the bootloader's `.efi` under `EFI/BOOT/`, plus `kernel.elf` at
-the ESP root), and boots it in QEMU under OVMF firmware. The bootloader
-loads and hands off to the kernel, which paints the framebuffer blue and
-reports success itself. A normal run keeps the QEMU display off
-(`-display none`) so the kernel's blue screen isn't visible — the pass/fail
-signal comes from the QEMU exit code and the serial log, not the display.
-Once the kernel has taken over from the UEFI console, it reports its own
-progress on the same serial console via a COM1 driver, so its output now
-appears right after the bootloader's handing off to kernel line.
+This builds the bootloader and kernel, stages an EFI System Partition directory
+(the bootloader's .efi under EFI/BOOT/, plus kernel.elf at the ESP root), and
+boots it in QEMU under OVMF firmware. The bootloader loads and hands off to
+the kernel, which paints the framebuffer blue and mirrors its boot trace to
+both COM1 and the screen. A normal run keeps the QEMU display off
+(-display none), but xtask captures the 1280x800 GOP surface through QEMU's
+monitor and verifies that it contains text as well as the expected success
+exit code and serial trace.
 
 `xtask` also drives the keyboard test: once QEMU is up it connects to
 QEMU's monitor socket and injects `sendkey a` repeatedly, every 500ms, for
@@ -98,22 +93,21 @@ bootloader — looks like this:
 ```
 === Rust_BL kernel ===
 framebuffer: 1280x800 stride=1280 @ 0x80000000
-kernel image: base=0x200000 size=0xf000
+kernel image: base=0x200000 size=0x11000
 GDT + TSS loaded (code selector 0x8)
 IDT loaded
 PICs remapped to vectors 32-47
 PIT programmed at 100 Hz
 8042 PS/2 controller initialised
-EXCEPTION: breakpoint at 0x200af2 (execution will resume)
+EXCEPTION: breakpoint at 0x200cc2 (execution will resume)
 selftest: breakpoint handled and execution resumed
 framebuffer painted
 enabling interrupts
 key: 'a'
-key: 'a'
 timer: 100 ticks received — IRQ0 works
 waiting for a keypress...
-keyboard: 2 key event(s) received — IRQ1 works
-PASS: bootloader exited with expected code 33
+keyboard: 1 key event(s) received — IRQ1 works
+PASS: bootloader exited with expected code 33, and the screen has text
 ```
 
 Two things worth noting about this trace: the `key: 'a'` lines can appear
@@ -137,7 +131,7 @@ no longer appears in this trace. Milestone 3 could afford to provoke one
 deliberately on every boot, as the kernel had nothing left to do
 afterward; this milestone's kernel has to keep running to service IRQ0 and
 IRQ1, so nothing in the current boot path triggers a fault on purpose any
-more. Milestone 5's stack guard page will make a genuine stack-overflow
+more. Milestone 6's stack guard page will make a genuine stack-overflow
 double fault happen naturally, at which point this handler becomes
 testable again rather than just present.
 

@@ -18,6 +18,11 @@ const EXPECTED_EXIT_CODE: i32 = 33;
 // Matches qemu_exit::QemuExitCode::Failed (0x11): (0x11 << 1) | 1 = 35.
 const FAILURE_EXIT_CODE: i32 = 35;
 
+/// Where the guest framebuffer capture is written.
+const SCREENSHOT: &str = "/tmp/rust_bl_screen.ppm";
+/// The GOP surface dimensions QEMU exposes to this test.
+const KERNEL_SCREENSHOT_DIMENSIONS: &[u8] = b"1280 800";
+
 /// How long to let QEMU run before assuming the bootloader hung and killing
 /// it. Without this, a boot hang blocks `cargo xtask run` forever with no
 /// way to report failure.
@@ -91,7 +96,11 @@ fn run() -> ExitCode {
 
     match observed {
         Some(EXPECTED_EXIT_CODE) => {
-            println!("PASS: bootloader exited with expected code {EXPECTED_EXIT_CODE}");
+            if let Err(msg) = check_screen_has_text() {
+                eprintln!("FAIL: {msg}");
+                return ExitCode::FAILURE;
+            }
+            println!("PASS: bootloader exited with expected code {EXPECTED_EXIT_CODE}, and the screen has text");
             ExitCode::SUCCESS
         }
         Some(FAILURE_EXIT_CODE) => {
@@ -107,6 +116,45 @@ fn run() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Check that the guest actually drew something other than the background.
+///
+/// Before this milestone the captured framebuffer contained exactly one
+/// colour, because a solid fill was the only thing ever drawn. More than one
+/// means glyphs reached the screen. This is deliberately a weak assertion
+/// about *what* was drawn and a strong one about *whether* anything was --
+/// the serial trace already covers content.
+fn check_screen_has_text() -> Result<(), String> {
+    let data = fs::read(SCREENSHOT)
+        .map_err(|e| format!("no screen capture at {SCREENSHOT}: {e}"))?;
+
+    // PPM: "P6\n<w> <h>\n<maxval>\n" then raw RGB triples.
+    let mut parts = data.splitn(4, |b| *b == b'\n');
+    let magic = parts.next().unwrap_or(b"");
+    if magic != b"P6" {
+        return Err("screen capture is not a P6 PPM".to_string());
+    }
+    let dimensions = parts.next().unwrap_or(b"");
+    if dimensions != KERNEL_SCREENSHOT_DIMENSIONS {
+        return Err(format!(
+            "screen capture is not the 1280x800 kernel surface (got {})",
+            String::from_utf8_lossy(dimensions)
+        ));
+    }
+    parts.next();
+    let pixels = parts.next().unwrap_or(b"");
+
+    let mut first: Option<[u8; 3]> = None;
+    for chunk in pixels.chunks_exact(3) {
+        let rgb = [chunk[0], chunk[1], chunk[2]];
+        match first {
+            None => first = Some(rgb),
+            Some(seen) if seen != rgb => return Ok(()),
+            _ => {}
+        }
+    }
+    Err("the screen shows a single flat colour \u{2014} no text was drawn".to_string())
 }
 
 /// Negative test: corrupt the staged kernel's ELF magic and check that the
@@ -265,6 +313,18 @@ fn inject_keystrokes(socket_path: String) {
             eprintln!("note: could not reach the QEMU monitor; no keys will be injected");
             return;
         };
+
+        // OVMF creates the monitor socket while its 640x480 firmware console
+        // is still active. Give the kernel time to switch to the 1280x800 GOP
+        // surface before capturing; the dimension check below rejects a stale
+        // firmware image if a slow host has not reached it yet.
+        thread::sleep(Duration::from_millis(4_500));
+
+        // Capture the screen first: once a key lands the kernel finishes
+        // and exits, and there is nothing left to photograph.
+        let _ = fs::remove_file(SCREENSHOT);
+        let _ = stream.write_all(format!("screendump {SCREENSHOT}\n").as_bytes());
+        thread::sleep(Duration::from_millis(500));
 
         // Keep injecting until the write fails (QEMU exited), which is
         // already the normal way this loop ends — not for a fixed number
