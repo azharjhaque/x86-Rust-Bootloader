@@ -189,11 +189,43 @@ These map directly to the implementation plan phases:
    short write-up of what was implemented (this is the artifact that
    actually gets shown on a resume/portfolio).
 
+All seven are complete as of milestone 7. Milestone 7 delivered a static
+screenshot rather than a GIF: an animated capture would have needed an LZW
+encoder and multi-frame timing, and the sequence it would show — a boot
+trace appearing line by line — is not worth that against a single frame that
+carries the same information. The write-up became the README itself rather
+than a separate document, so that a reader landing on the repository meets
+it first.
+
+## Post-roadmap work
+
+Not scheduled, and not designed here. Recorded so the boundary between
+"deliberately out of scope" and "never thought about" stays visible:
+
+- **Paging, and the stack guard page that depends on it.** The prerequisite
+  for making the double-fault handler testable again. Also needs the kernel
+  to know where its stack is, which means a new `BootInfo` field and a
+  `BOOT_INFO_VERSION` bump.
+- **USB/xHCI HID keyboard.** The PS/2 driver works under QEMU but not on
+  hardware that exposes its keyboard over USB. A separate subsystem, not an
+  extension of the PS/2 path.
+- **Interactive echo mode.** The boot flow above describes the kernel
+  "echoing keypresses to the framebuffer" from an idle loop. That behaviour
+  does occur — but only as a side effect of `qemu_exit::exit` falling
+  through into its `hlt` loop when no `isa-debug-exit` device is present,
+  and each keystroke prints a labelled `key: 'x'` line rather than echoing
+  inline. Making it a real mode would mean inline echo, modifier/shift
+  handling, and an idle loop entered on purpose rather than by accident.
+
 ## Open questions / decisions deferred to implementation
 
-- Hand-rolled bump/free-list heap allocator vs. pulling in
+- ~~Hand-rolled bump/free-list heap allocator vs. pulling in
   `linked_list_allocator`: leaning hand-rolled for resume value, final call
-  can be made during milestone 6 without affecting earlier milestones.
+  can be made during milestone 6 without affecting earlier milestones.~~
+  Resolved during milestone 6: both allocators are hand-rolled, with no
+  allocator crate. The heap is an address-ordered free list with splitting
+  and bidirectional coalescing; the frame allocator is a bump cursor over
+  the usable regions plus an intrusive free stack.
 - ~~Exact custom target JSON contents will be worked out at milestone 1
   against whatever current nightly requires (these flags shift across Rust
   versions).~~ Resolved during milestone 2: no custom target JSON exists;
