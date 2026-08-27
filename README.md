@@ -118,22 +118,16 @@ its root, disable Secure Boot, and boot from it.
 
 The points below are limitations to know about:
 
-- **Keyboard input needs an i8042 controller.** A desktop with a PS/2
-  keyboard, or a laptop whose built-in keyboard is wired through the
-  embedded controller as i8042, will work — and gives continuous echo, since
-  with no QEMU debug-exit device present the kernel stays in its idle loop
-  with interrupts live. USB HID keyboards need xHCI and HID drivers, which
-  are not implemented. Input is lowercase only; there is no modifier
-  handling.
-- **Serial output requires COM1 at `0x3F8`.** Machines without one show the
-  boot trace on the framebuffer alone.
-- **The timer wait has no timeout of its own.** The kernel waits for 100 PIT
-  ticks, so a chipset that does not emulate the 8259 and 8254 will wait
-  indefinitely.
-- **The kernel loads at a fixed physical address**, 2 MiB, requested
-  exactly. If firmware has reserved that range the loader reports
-  `AllocationFailed` rather than relocating.
-- **Shutdown targets QEMU's debug-exit device.** On hardware the exit path
+- **Keyboard input needs an i8042 controller.** PS/2 keyboards work, echoing
+  continuously; USB HID needs xHCI and HID drivers, which are not
+  implemented. Lowercase only, no modifier handling.
+- **Serial output requires COM1 at `0x3F8`.** Without one, the boot trace
+  appears on the framebuffer alone.
+- **The 100-tick timer wait has no timeout.** It needs an 8259 PIC and an
+  8254 PIT present or emulated.
+- **The kernel loads at a fixed 2 MiB physical address.** If firmware has
+  reserved that range, the loader reports `AllocationFailed`.
+- **Shutdown targets QEMU's debug-exit device.** On hardware the kernel
   halts instead, so power the machine off yourself.
 
 Step-by-step instructions and the full list of failure modes are in
