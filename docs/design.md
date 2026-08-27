@@ -1,233 +1,206 @@
-# Rust UEFI Bootloader + Minimal Kernel — Design Spec
+# Design: a UEFI bootloader and minimal kernel in Rust
 
 ## Goal
 
-Build a custom UEFI bootloader and minimal freestanding kernel, written from
-scratch in Rust. Primary purpose: learn Rust systems programming and OS
-internals, and produce a portfolio/resume-worthy project with a working demo
-(boots in QEMU, prints to a framebuffer, handles hardware interrupts).
+Build a UEFI bootloader and a small freestanding kernel for x86_64 from
+scratch, in Rust, with no operating system underneath.
 
-Explicitly *not* using the `bootloader` crate — the value of this project is
-in implementing the boot flow, ELF loading, mode/handoff mechanics, and
-interrupt handling ourselves rather than delegating to an existing bootloader
-library.
+The point is to implement the parts most projects skip by pulling in a
+crate: parsing and loading an ELF, collecting boot information from
+firmware, leaving UEFI behind cleanly, setting up descriptor tables,
+handling hardware interrupts, and managing physical memory. Using the
+`bootloader` crate would have produced a working kernel faster and taught
+almost none of that.
 
-## Scope (MVP — "Approach B")
+Target is QEMU with OVMF firmware. No physical hardware requirement.
 
-In scope:
-- A UEFI application (`bootloader`) that loads a separate kernel ELF from the
-  EFI System Partition, parses and maps it itself, collects boot-time
-  information (memory map, framebuffer), exits UEFI boot services, and jumps
-  to the kernel entry point.
-- A freestanding kernel (`kernel`) that receives the boot info, sets up its
-  own GDT and IDT, handles PIT timer and PS/2 keyboard interrupts, and
-  renders text to the framebuffer.
-- A minimal physical frame allocator and heap allocator in the kernel so
-  `alloc` collection types work.
-- QEMU + OVMF as the only tested target (no real hardware requirement).
-- A `cargo xtask`-based build/run pipeline.
+## Scope
 
-Out of scope for MVP (explicit future work, not to be designed further now):
-- Custom virtual memory management / paging beyond what UEFI hands off
-- Preemptive multitasking / scheduler
-- A real filesystem driver (kernel and bootloader both read only from the ESP
-  via UEFI's Simple File System protocol / a FAT structure baked into the
-  disk image)
-- User-mode processes / syscalls
-- A legacy BIOS boot path
+Built:
+
+- A UEFI application that loads a separate kernel ELF from the EFI System
+  Partition, parses and maps it, collects the memory map and framebuffer,
+  exits boot services, and jumps to the kernel.
+- A freestanding kernel that sets up its own GDT and IDT, handles timer and
+  keyboard interrupts, renders text to the framebuffer, and manages its own
+  physical memory.
+- A physical frame allocator and a heap allocator, so `Box`, `Vec`, and
+  `String` work inside the kernel.
+- A `cargo xtask` pipeline that builds everything, stages a disk image, and
+  runs it under QEMU.
+
+Deliberately not built:
+
+- Custom page tables. The kernel runs on the identity mapping UEFI leaves
+  behind.
+- A scheduler or any form of multitasking.
+- A filesystem driver. Both binaries read only from the ESP.
+- User mode and syscalls.
+- A legacy BIOS boot path.
 
 ## Architecture
 
-Cargo workspace with four crates:
+Four crates in one Cargo workspace:
 
 ```
-Rust_BL/
-├── bootloader/     # UEFI application (PE32+), no_std, target x86_64-unknown-uefi
-├── kernel/         # freestanding kernel ELF, no_std, target x86_64-unknown-none
-├── boot_info/      # shared #[repr(C)] crate: the handoff struct/ABI
-└── xtask/          # build automation: assembles disk image, launches QEMU
+bootloader/     UEFI application (PE32+), no_std, x86_64-unknown-uefi
+kernel/         freestanding kernel ELF, no_std, x86_64-unknown-none
+boot_info/      shared #[repr(C)] handoff ABI
+xtask/          build automation: stages the ESP, launches QEMU
 ```
 
-`boot_info` exists so the bootloader→kernel interface is a real, shared,
-versionable Rust type rather than hand-computed memory offsets duplicated in
-two places.
+`boot_info` exists because the bootloader and the kernel are separately
+compiled binaries that have to agree on a memory layout exactly. Making that
+agreement a shared Rust type, rather than offsets written down in two
+places, means a mismatch is a compile error instead of a mysterious fault at
+runtime. The crate asserts its own struct sizes at compile time for the same
+reason.
 
 ## Boot flow
 
-1. OVMF (UEFI firmware, running under QEMU) loads `bootloader.efi` from the
-   EFI System Partition and calls its `efi_main`.
-2. Bootloader, using the `uefi` crate for boot-services calls:
-   - Opens the ESP via the Simple File System protocol and reads
-     `kernel.elf` into memory.
-   - Parses the ELF program headers itself (no ELF-loading crate) and, for
-     each `PT_LOAD` segment, allocates pages via UEFI's `allocate_pages` and
-     copies segment data to the segment's `p_vaddr`.
-   - Obtains a framebuffer via the Graphics Output Protocol (GOP): address,
-     resolution, pixel format, stride.
-   - Obtains the UEFI memory map (required immediately before exiting boot
-     services, since the map key must match).
-3. Bootloader calls `exit_boot_services()`. After this point no further UEFI
-   boot-service calls are legal.
-4. Bootloader jumps to the kernel's ELF entry point, passing a pointer to a
-   `BootInfo` struct (memory map, framebuffer descriptor, kernel image
-   base/size).
-5. Kernel entry stub (small `core::arch::asm!` block) sets up its own stack,
-   then calls `kernel_main(&BootInfo) -> !`.
-6. Kernel: writes a startup message to the framebuffer, builds and loads its
-   own GDT, builds and loads its own IDT (including a double-fault handler),
-   remaps the PIC and unmasks the PIT timer + PS/2 keyboard IRQs, enables
-   interrupts, and enters a `hlt` idle loop — echoing keypresses to the
-   framebuffer as the interrupt-handling proof point.
+1. OVMF loads `bootloader.efi` from the ESP and calls `efi_main`.
+2. The bootloader opens the ESP, reads `kernel.elf`, and parses its program
+   headers by hand. For each `PT_LOAD` segment it allocates pages at the
+   segment's own virtual address and copies the data in, zeroing the
+   `.bss` tail.
+3. It acquires a framebuffer through the Graphics Output Protocol, then the
+   UEFI memory map. The map has to come last: its key must still be valid
+   when boot services exit.
+4. It calls `exit_boot_services`. Every UEFI service, including the logger,
+   is gone after this.
+5. It disables interrupts, switches to a stack it allocated earlier, and
+   jumps to the kernel entry point with a `BootInfo` pointer in `rdi`.
+6. The kernel validates `BootInfo`, brings up serial output, installs its
+   GDT and IDT, remaps the PICs, programs the timer, initialises the
+   keyboard controller, paints the framebuffer, initialises both allocators,
+   and enables interrupts.
 
-## Memory management (MVP scope)
+Step 5 has two details that are easy to get wrong and hard to debug. The
+`cli` is required because `exit_boot_services` leaves interrupts enabled
+while `IDTR` still points into firmware memory that is about to be reused;
+one interrupt in that window reads a descriptor that may no longer exist.
+And the stack pointer is deliberately biased by 8, because the SysV ABI
+guarantees a function sees `rsp % 16 == 8` on entry — true after a `call`,
+which pushes a return address, but not after a `jmp`, which pushes nothing.
 
-~~- Physical frame allocator: seeded from the UEFI memory map handed off in
-  `BootInfo`; a simple free-list or bump allocator over `EfiConventionalMemory`
-  regions is sufficient — no buddy allocator needed at this scope.~~
-~~- Heap allocator: a small fixed-size kernel heap (hand-rolled bump or
-  free-list allocator, registered as the kernel's `#[global_allocator]`) so
-  `alloc::vec::Vec`, `Box`, etc. work for later milestones (e.g., keyboard
-  input buffering).~~
+## Memory management
 
-Resolved during milestone 6: both were built, and what follows describes
-what exists rather than what was planned. The original text above is kept
-struck through, as with the other resolved decisions in this document.
+**Frame allocator.** Seeded from the UEFI memory map, filtered to
+`CONVENTIONAL` regions. A bump cursor walks those regions; freed frames go
+onto a LIFO stack whose links are written into the free frames themselves.
+No side table, and no bootstrap problem — a bitmap would need storage before
+any allocator exists to hand it out.
 
-- Physical frame allocator: seeded from the UEFI memory map handed off in
-  `BootInfo`, filtered to `EfiConventionalMemory` regions. A bump cursor
-  walks those regions, and freed frames go onto an intrusive LIFO stack
-  whose nodes are written *into the free frames themselves* — so the
-  allocator needs no side table, and there is none of the bootstrap
-  awkwardness a bitmap would bring (a bitmap needs storage before any
-  allocator exists to provide it). No buddy allocator at this scope.
+Filtering on `CONVENTIONAL` does more work than it looks like. The
+bootloader allocates the kernel image, the kernel stack, `BootInfo`, and the
+region array as `LOADER_DATA`, so that one check excludes everything the
+kernel is still running on. There is no exclusion list to maintain or get
+wrong.
 
-  Filtering on `CONVENTIONAL` is load-bearing rather than merely tidy: the
-  bootloader allocates the kernel image, the kernel stack, `BootInfo`, and
-  the region array as `LOADER_DATA`, so that single check automatically
-  excludes every allocation the kernel is still running on — no
-  hand-maintained exclusion list to drift out of date.
+**Heap.** 1 MiB, carved from 256 contiguous frames at boot. An
+address-ordered free list with splitting and coalescing in both directions,
+registered as the `#[global_allocator]`. Block headers live inside the free
+blocks, same idea as the frame allocator. Coalescing matters more than it
+sounds: `Vec` grows by reallocating at doubling sizes, and without merging
+adjacent free blocks the heap fragments into slivers that fit nothing.
 
-- Heap allocator: 1 MiB carved from 256 contiguous frames at boot, run as
-  an address-ordered free list with splitting and bidirectional coalescing,
-  registered as the kernel's `#[global_allocator]`. Headers live inside the
-  free blocks, as with the frame allocator. `Vec`, `Box`, and `String` all
-  work; coalescing is what keeps repeated `Vec` growth from shredding the
-  heap into unusable slivers.
-
-- Both allocators guard their multi-word state with
-  `interrupts::without_interrupts`, which on a single-core kernel is a
-  complete critical section.
-- No custom page tables in MVP: the kernel continues using whatever
-  identity/mapping UEFI left in place. Building an independent paging setup
-  is called out as future work, not designed here.
+Both allocators protect their state with `interrupts::without_interrupts`.
+On a single-core kernel with no threads, disabling interrupts is a complete
+critical section — a lock would add nothing.
 
 ## Toolchain
 
-- Rust **nightly** with the `rust-src` component (`rustup component add
-  rust-src --toolchain nightly`).
-- `uefi` crate for the bootloader's boot-services bindings.
-- The kernel targets the built-in Tier 2 `x86_64-unknown-none` target
-  (`rustup target add x86_64-unknown-none`) rather than a custom target
-  JSON: it already defaults to the kernel code model, no red zone, and no
-  SSE/AVX, and — being Tier 2 — ships `core`/`alloc` precompiled, so no
-  `-Z build-std` is needed either. See "Deviation from the spec" in
-  [docs/plans/milestone-2-kernel-handoff.md](plans/milestone-2-kernel-handoff.md)
-  for why this replaced the custom-target-JSON approach originally
-  envisioned below.
-- `cargo xtask` crate for build/run orchestration (builds both crates,
-  assembles a FAT/GPT disk image with the ESP layout, invokes QEMU) — kept as
-  ordinary Rust rather than shell scripts.
-- QEMU (`qemu-system-x86_64`) + OVMF firmware for all testing; no physical
-  hardware target for this project.
-- All assembly is inline `core::arch::asm!` — no external assembler (`nasm`)
-  dependency.
+- Rust nightly, pinned in `rust-toolchain.toml` along with both targets.
+- The `uefi` crate for boot services. It is the only third-party dependency
+  anywhere in the workspace.
+- The kernel builds against the built-in `x86_64-unknown-none` target rather
+  than a custom target JSON. It already defaults to the kernel code model,
+  no red zone, and no SSE, and being Tier 2 it ships `core` and `alloc`
+  precompiled, so `-Z build-std` is unnecessary.
+- All assembly is inline `asm!`. No external assembler.
+- `xtask` is ordinary Rust rather than shell scripts, so the build logic is
+  type-checked and testable.
 
-## Testing / verification approach
+## Verification
 
-No unit-test framework in the traditional sense (freestanding, no host to run
-tests on). Verification is:
-- **Boot smoke test**: xtask launches QEMU with the built image; a successful
-  boot to the kernel's `hlt` loop without a triple fault is the base
-  pass/fail signal.
-- **Milestone markers**: ~~the kernel/bootloader write a milestone marker
-  (e.g., "GDT loaded", "IDT loaded", "timer interrupt received") to the
-  QEMU `isa-debug-exit` device with a distinct exit code, so `xtask` can
-  script pass/fail checks per milestone instead of relying on visual
-  inspection alone.~~ Reversed during milestone 3: `QemuExitCode` stays a
-  two-value terminal verdict (`Success` / `Failed`, exit codes 33 / 35).
-  Per-step progress ("GDT + TSS loaded", "IDT loaded", the double-fault
-  report, ...) goes to the serial console instead, via the UART driver
-  milestone 3 added — a distinct `isa-debug-exit` code per milestone would
-  need `xtask` to track which milestone is running for no real benefit once
-  the trace is human- and `grep`-readable on serial, and some of what needs
-  reporting (e.g. the double-fault handler's two stack addresses) doesn't
-  fit in a single exit-code byte anyway.
-- **Visual verification**: framebuffer text output and keyboard echo are
-  confirmed by eye in the QEMU window for milestones where that's the
-  natural check (text rendering, keypress echo).
+There is no test harness inside a freestanding kernel, so correctness is
+checked in three layers.
+
+**Host unit tests** cover the logic that can be separated from hardware:
+the memory-region arithmetic feeding the frame allocator, and the
+screen-capture parsing in `xtask`. These run natively under `cargo test`.
+
+**The boot smoke test** (`cargo xtask run`) boots the image in QEMU and
+requires an exit code of 33, a framebuffer that contains real glyphs, and
+both interrupt lines proven live. Keystrokes are injected through QEMU's
+monitor, so no human is needed. The kernel asserts its own invariants and
+exits with a failure code if any of them break, which means a regression
+fails the build rather than printing a warning into a log.
+
+**The failure-path test** (`cargo xtask test`) corrupts the kernel image and
+checks that the bootloader rejects it instead of jumping into it. This
+exists because the happy path never exercises a single validation branch in
+the ELF loader — all of that code could be deleted and `cargo xtask run`
+would still pass. The distinction is worth testing: a rejection is a logged
+error and a clean exit, while a miss is a triple fault with nothing left
+alive to report it.
+
+Progress is reported on the serial console rather than through per-step exit
+codes. A single byte cannot carry something like the double-fault handler's
+two stack addresses, and a readable trace is more useful than a number.
 
 ## Milestones
 
-~~The original sequence put framebuffer text rendering in Milestone 4, the
-allocator in Milestone 5, and polish in Milestone 6.~~ Resolved during
-Milestone 5: framebuffer text rendering is independent of the allocator, so
-it became its own completed Milestone 5; the allocator is Milestone 6 and
-polish is Milestone 7.
+Each was built and verified before the next began.
 
-These map directly to the implementation plan phases:
+1. Workspace scaffold and an `xtask` that boots an empty `.efi`, proving the
+   toolchain end to end before any real logic exists.
+2. Bootloader: ELF loader, memory map, framebuffer, exit boot services, and
+   a jump to a kernel stub that writes one pixel.
+3. Kernel: GDT, IDT, double-fault handler.
+4. Kernel: PIT timer and PS/2 keyboard interrupts.
+5. Kernel: framebuffer text rendering, serial fan-out, and an automated
+   screen-capture assertion.
+6. Kernel: physical frame allocator and heap allocator.
+7. Screenshot, README, and this document.
 
-1. Workspace scaffold + `xtask` that builds an empty `.efi` and boots it in
-   QEMU/OVMF (proves the toolchain end-to-end before any real logic).
-2. Bootloader: ELF loader + UEFI memory map + GOP framebuffer acquisition +
-   exit_boot_services + jump to a kernel stub that writes one pixel.
-3. Kernel: GDT + IDT + double-fault handler.
-4. Kernel: PIT timer interrupt + PS/2 keyboard interrupt.
-5. Kernel: framebuffer text rendering, including serial fan-out and an
-   automated framebuffer capture assertion.
-6. Kernel: physical frame allocator + heap allocator, prove `alloc` works.
-7. Polish: README with build/run instructions, screenshot/GIF of it booting,
-   short write-up of what was implemented (this is the artifact that
-   actually gets shown on a resume/portfolio).
+## Future work
 
-All seven are complete as of milestone 7. Milestone 7 delivered a static
-screenshot rather than a GIF: an animated capture would have needed an LZW
-encoder and multi-frame timing, and the sequence it would show — a boot
-trace appearing line by line — is not worth that against a single frame that
-carries the same information. The write-up became the README itself rather
-than a separate document, so that a reader landing on the repository meets
-it first.
+- **Paging, and the stack guard page it enables.** Without a guard page the
+  double-fault handler is installed and correct but never exercised, since
+  nothing in the boot path faults on purpose. This also needs the kernel to
+  learn where its stack is, which means a new `BootInfo` field.
+- **A USB/xHCI HID keyboard driver.** The PS/2 driver works under QEMU but
+  not on hardware that exposes its keyboard over USB. That is a new
+  subsystem, not an extension of the existing path.
+- **A real interactive mode.** Keystrokes currently print one labelled line
+  each, and only reach an idle loop as a side effect of the QEMU exit device
+  being absent. Inline echo with shift handling would make it deliberate.
 
-## Post-roadmap work
+## Decisions that changed
 
-Not scheduled, and not designed here. Recorded so the boundary between
-"deliberately out of scope" and "never thought about" stays visible:
+Kept because the reasoning is more useful than the conclusion.
 
-- **Paging, and the stack guard page that depends on it.** The prerequisite
-  for making the double-fault handler testable again. Also needs the kernel
-  to know where its stack is, which means a new `BootInfo` field and a
-  `BOOT_INFO_VERSION` bump.
-- **USB/xHCI HID keyboard.** The PS/2 driver works under QEMU but not on
-  hardware that exposes its keyboard over USB. A separate subsystem, not an
-  extension of the PS/2 path.
-- **Interactive echo mode.** The boot flow above describes the kernel
-  "echoing keypresses to the framebuffer" from an idle loop. That behaviour
-  does occur — but only as a side effect of `qemu_exit::exit` falling
-  through into its `hlt` loop when no `isa-debug-exit` device is present,
-  and each keystroke prints a labelled `key: 'x'` line rather than echoing
-  inline. Making it a real mode would mean inline echo, modifier/shift
-  handling, and an idle loop entered on purpose rather than by accident.
+**Custom target JSON, dropped at milestone 2.** The original plan was a
+hand-written target specification. `x86_64-unknown-none` turned out to
+already have the right defaults and ship precompiled core libraries, which
+removed both the JSON and the `build-std` step.
 
-## Open questions / decisions deferred to implementation
+**Per-milestone exit codes, dropped at milestone 3.** The plan was for each
+milestone to signal progress with its own `isa-debug-exit` code. That would
+have required `xtask` to track which milestone was running, for no benefit
+once serial output existed and could carry a readable trace.
 
-- ~~Hand-rolled bump/free-list heap allocator vs. pulling in
-  `linked_list_allocator`: leaning hand-rolled for resume value, final call
-  can be made during milestone 6 without affecting earlier milestones.~~
-  Resolved during milestone 6: both allocators are hand-rolled, with no
-  allocator crate. The heap is an address-ordered free list with splitting
-  and bidirectional coalescing; the frame allocator is a bump cursor over
-  the usable regions plus an intrusive free stack.
-- ~~Exact custom target JSON contents will be worked out at milestone 1
-  against whatever current nightly requires (these flags shift across Rust
-  versions).~~ Resolved during milestone 2: no custom target JSON exists;
-  the kernel builds against the built-in `x86_64-unknown-none` target
-  instead (see the Toolchain section above).
+**Milestone renumbering, at milestone 5.** Framebuffer text turned out to be
+independent of the allocator, so it became its own milestone rather than
+part of one.
+
+**Hand-rolled allocators, confirmed at milestone 6.** Whether to write both
+allocators or pull in `linked_list_allocator` was left open deliberately.
+Hand-rolled won: the heap's splitting and coalescing is the most instructive
+code in the project, and adding an allocator crate would have undercut the
+premise.
+
+**A screenshot rather than a GIF, at milestone 7.** An animated capture
+needs an LZW encoder and multi-frame timing. A boot trace appearing line by
+line carries no more information than one frame of it does.
