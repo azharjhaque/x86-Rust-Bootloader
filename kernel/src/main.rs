@@ -4,6 +4,7 @@
 
 use boot_info::{BootInfo, PixelFormatKind};
 
+mod console;
 mod font;
 mod gdt;
 mod idt;
@@ -63,6 +64,10 @@ fn kernel_main(info: &BootInfo) -> ! {
     selftest();
 
     let (skipped, fell_back) = fill_screen(info, 0x00, 0x33, 0x99);
+    // SAFETY: called once, and `info` was validated in `_start`.
+    unsafe { console::init(&info.framebuffer) };
+    // Mark the output path live until Task 3 wires kprintln! into it.
+    console::write_byte(b'\r');
     kprintln!("framebuffer painted");
     if fell_back {
         kprintln!("  note: pixel format was not recognised; assumed BGR");
