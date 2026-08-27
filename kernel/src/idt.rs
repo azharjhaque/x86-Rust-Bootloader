@@ -263,7 +263,7 @@ fn report_fault(name: &str, frame: &InterruptStackFrame, error_code: Option<u64>
     if let Some(code) = error_code {
         crate::kprintln!("  error code:          {code:#x}");
     }
-    crate::kprintln!("  unrecoverable — halting");
+    crate::kprintln!("  unrecoverable - halting");
 
     crate::qemu_exit::exit(crate::qemu_exit::QemuExitCode::Failed)
 }
@@ -330,7 +330,7 @@ extern "x86-interrupt" fn double_fault_handler(
     crate::kprintln!("  handler stack:        {:#x}", handler_rsp);
     crate::kprintln!("  fault stack spans:    {fault_lo:#x}..{fault_hi:#x}");
     if handler_rsp >= fault_lo && handler_rsp < fault_hi {
-        crate::kprintln!("  handler ran on the IST stack — the machine did not reset");
+        crate::kprintln!("  handler ran on the IST stack - the machine did not reset");
     } else {
         crate::kprintln!("  WARNING: handler is NOT on the IST stack; the switch did not happen");
     }

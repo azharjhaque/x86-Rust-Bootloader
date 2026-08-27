@@ -132,7 +132,7 @@ fn kernel_main(info: &'static BootInfo) -> ! {
     while idt::ticks() < TICKS_REQUIRED {
         interrupts::hlt();
     }
-    kprintln!("timer: {TICKS_REQUIRED} ticks received — IRQ0 works");
+    kprintln!("timer: {TICKS_REQUIRED} ticks received - IRQ0 works");
 
     // Now wait for a keystroke. `xtask` injects one through QEMU's monitor;
     // a human running QEMU directly can just type. Bound the wait in ticks
@@ -143,12 +143,12 @@ fn kernel_main(info: &'static BootInfo) -> ! {
     let deadline = idt::ticks() + TIMER_HZ as u64 * 10;
     while idt::key_events_seen() == 0 {
         if idt::ticks() > deadline {
-            kprintln!("keyboard: no input within 10s — IRQ1 is not delivering");
+            kprintln!("keyboard: no input within 10s - IRQ1 is not delivering");
             qemu_exit::exit(qemu_exit::QemuExitCode::Failed);
         }
         interrupts::hlt();
     }
-    kprintln!("keyboard: {} key event(s) received — IRQ1 works", idt::key_events_seen());
+    kprintln!("keyboard: {} key event(s) received - IRQ1 works", idt::key_events_seen());
 
     qemu_exit::exit(qemu_exit::QemuExitCode::Success)
 }

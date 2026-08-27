@@ -1,30 +1,26 @@
 # Rust_BL — A UEFI Bootloader + Kernel, Written From Scratch in Rust
 
-A from-scratch UEFI bootloader and minimal kernel for x86_64, written in
-Rust with no OS-provided runtime. Built to learn Rust systems programming
-and OS internals — no `bootloader` crate, no borrowed kernel: the boot flow,
-ELF loading, and interrupt handling are all implemented from scratch here
-rather than delegated to an existing library, milestone by milestone.
+A from-scratch UEFI bootloader and minimal x86_64 kernel, written in Rust
+with no OS-provided runtime. No `bootloader` crate, no borrowed kernel, no
+allocator crate: the boot flow, ELF loading, interrupt handling, and memory
+management are all implemented here rather than delegated to a library.
 
-## Status
+![The kernel booted in QEMU, showing its allocator trace and live keyboard input](docs/images/boot.png)
 
-Milestone 6 of 7 is complete and verified: the kernel now manages its own
-physical memory. A frame allocator seeded from the UEFI memory map hands out
-4 KiB frames, and a coalescing heap carved from 256 of those frames backs a
-`#[global_allocator]` — so `Box`, `Vec`, and `String` work inside the kernel.
-Both allocators are written from scratch with no allocator crate, and both
-store their free lists *inside the free memory itself* rather than in a side
-table, so a free frame or block costs zero bytes of bookkeeping.
+That screenshot is the kernel's own framebuffer console — glyphs blitted
+pixel by pixel from an embedded 8×16 bitmap font onto a UEFI GOP surface,
+with no firmware text services involved (they are gone by then). The
+`key: 'h'` lines are live PS/2 keystrokes arriving on IRQ1 and being echoed
+as they are typed.
 
-Everything from Milestone 5 still holds: the boot trace is mirrored to both
-COM1 and the framebuffer, xtask captures the kernel's 1280x800 screen and
-rejects a flat image, and the 8259 PIC, PIT, and PS/2 keyboard checks remain
-automated.
+## What it does
 
-See [docs/design.md](docs/design.md) for the full design, and
-[docs/plans/](docs/plans/) for implementation plans per milestone.
+Boots under OVMF, loads a separate kernel ELF off the EFI System Partition,
+parses and maps it by hand, exits UEFI boot services, and jumps to a
+freestanding kernel that sets up its own GDT, IDT, and interrupt
+controllers, then manages its own physical memory.
 
-## Roadmap
+All seven milestones are complete:
 
 - [x] 1. Toolchain bootstrap — empty UEFI app boots in QEMU/OVMF
 - [x] 2. Bootloader: ELF loader, memory map, framebuffer, handoff to kernel
@@ -32,7 +28,76 @@ See [docs/design.md](docs/design.md) for the full design, and
 - [x] 4. Kernel: PIT timer + PS/2 keyboard interrupts
 - [x] 5. Kernel: framebuffer text rendering and serial fan-out
 - [x] 6. Kernel: physical frame allocator + heap allocator
-- [ ] 7. Polish: docs, screenshots/GIF, write-up
+- [x] 7. Polish: docs, screenshot, write-up
+
+## The parts worth reading
+
+Most of this project's value is in the places where the hardware or the
+firmware contract refuses to cooperate. A few of those:
+
+**Validating the kernel ELF *before* the point of no return.**
+[`bootloader/src/elf.rs`](bootloader/src/elf.rs) checks magic, class,
+endianness, machine, segment bounds, and entry-point range — all before
+`ExitBootServices`. The ordering is the whole point: caught there, a bad
+image is a logged error and a clean exit; missed, it is a triple fault with
+no logger left alive to report anything. `cargo xtask test` deliberately
+corrupts the image to prove that path still works.
+
+**The stack has to arrive misaligned.** The SysV ABI guarantees a function
+sees `rsp % 16 == 8` at entry, because an ordinary `call` pushed an 8-byte
+return address. The kernel is reached by `jmp`, which pushes nothing, so
+[`handoff.rs`](bootloader/src/handoff.rs) biases the stack pointer by 8 by
+hand. Skip it and every stack slot LLVM believes is 16-byte aligned is off
+by eight — the first aligned SSE spill faults, with no handler installed to
+say so.
+
+**Interrupts must be off across the handoff.** `ExitBootServices` leaves
+`IF` set and `IDTR` still pointing at firmware memory that is about to be
+handed back to the allocator. A single interrupt in that window reads a
+descriptor out of memory that may no longer hold one, so the bootloader
+executes `cli` before the jump — a precondition living in a different binary
+from the code that depends on it.
+
+**`-z relro` breaks the loader, subtly.** The linker's default carves a tiny
+`.got` into its own non-page-aligned `PT_LOAD` segment, landing on the same
+page as `.rodata`. Since the loader allocates each segment's pages
+independently, the second claim on that shared page fails outright — before
+the kernel runs at all. [`kernel/build.rs`](kernel/build.rs) passes
+`-znorelro` to fold `.got` into the already-aligned `.data`.
+
+**Free lists that live inside the free memory.** Neither allocator keeps a
+side table. A free physical frame stores its "next" pointer in its own first
+eight bytes ([`kernel/src/frame.rs`](kernel/src/frame.rs)); a free heap block
+stores its size and link in its own header
+([`kernel/src/heap.rs`](kernel/src/heap.rs)). Bookkeeping costs zero bytes of
+separate storage, and the heap coalesces with both neighbours on free, which
+is what keeps repeated `Vec` growth from shredding it into unusable slivers.
+
+**One critical-section primitive, deliberately not `nomem`.**
+[`interrupts::without_interrupts`](kernel/src/interrupts.rs) saves and
+restores `IF` rather than blindly re-enabling it, because it is called from
+inside handlers where interrupts are already off. It also omits
+`options(nomem)` on purpose: that would let LLVM reorder loads and stores
+across the boundary, so a store from inside the critical section could sink
+past the `sti`. Omitting it makes each block a compiler barrier.
+
+## Quick start
+
+Requires a Debian/Ubuntu system (WSL2 works) with QEMU and OVMF:
+
+```bash
+sudo apt install -y build-essential qemu-system-x86 ovmf git curl
+```
+
+Then:
+
+```bash
+cargo xtask run
+```
+
+`rust-toolchain.toml` pins the nightly and installs both targets on first
+use. Full prerequisites, the annotated boot trace, and the failure-path test
+are in **[docs/running.md](docs/running.md)**.
 
 ## Repository layout
 
@@ -41,134 +106,48 @@ See [docs/design.md](docs/design.md) for the full design, and
 ├── boot_info/    # shared #[repr(C)] handoff ABI between the two
 ├── kernel/       # freestanding kernel ELF, no_std, x86_64-unknown-none
 ├── xtask/        # build automation: stages the ESP, launches QEMU
-└── docs/         # design spec and per-milestone implementation plans
+├── tools/        # one-off authoring scripts (font, screenshot)
+└── docs/         # design spec, per-milestone plans, running guide
 ```
 
-## Prerequisites
+## How it is tested
 
-The real constraint is a Debian/Ubuntu-based Linux system: `xtask` hardcodes
-the Debian/Ubuntu `ovmf` package's OVMF firmware paths
-(`/usr/share/OVMF/OVMF_CODE_4M.fd` and `OVMF_VARS_4M.fd`). Any Linux with
-QEMU works in principle — these are just two constants near the top of
-`xtask/src/main.rs`, easy to adjust for other distros (Fedora ships OVMF
-under `/usr/share/edk2/ovmf/`, Arch under `/usr/share/edk2-ovmf/x64/`).
-Windows is not required; WSL2 + Ubuntu is simply the easiest way to get a
-Debian/Ubuntu environment if you're on Windows (`wsl --install -d Ubuntu`).
+There is no test framework in a freestanding kernel, so verification is
+layered instead:
 
-Inside your Debian/Ubuntu environment (WSL2 or otherwise):
+| Layer | Command | What it proves |
+|---|---|---|
+| Host unit tests | `cargo test -p boot_info -p xtask` | Memory-region arithmetic and screen-capture validation, run natively |
+| Boot smoke test | `cargo xtask run` | Boots to the idle loop, exit code 33, screen contains real glyphs, IRQ0 and IRQ1 both live |
+| Failure path | `cargo xtask test` | A corrupted ELF is *rejected* rather than jumped into (exit 35) |
 
-```bash
-sudo apt install -y build-essential qemu-system-x86 ovmf git curl
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly
-```
+The kernel does its own assertions and exits with a verdict code, so a
+broken invariant fails the build rather than printing a warning nobody
+reads. Keyboard input is injected through QEMU's monitor, so the interrupt
+tests need no human.
 
-`rust-toolchain.toml` in this repo pins the exact nightly and automatically
-installs the `rust-src` component and both targets this workspace needs —
-`x86_64-unknown-uefi` for the bootloader and `x86_64-unknown-none` for the
-kernel — the first time you run `cargo` here. No separate `rustup component
-add` / `rustup target add` steps needed.
+## What is deliberately not here
 
-## Build & run
+Scope was fixed up front in [docs/design.md](docs/design.md) and held:
 
-```bash
-git clone <this-repo-url>
-cd Rust_BL
-cargo xtask run
-```
+- **No custom page tables.** The kernel runs on the identity mapping UEFI
+  leaves behind. Milestone 6 allocates *physical* memory only.
+- **No stack guard page,** which follows from the above — so the
+  double-fault handler, though installed and running on its own IST stack,
+  is not exercised by the current boot path.
+- **No scheduler, no user mode, no filesystem driver, no BIOS boot path.**
+- **QEMU only.** The keyboard driver is legacy PS/2; real hardware that
+  exposes its keyboard over USB/xHCI would need an HID driver, which is a
+  subsystem rather than an extension.
 
-This builds the bootloader and kernel, stages an EFI System Partition directory
-(the bootloader's .efi under EFI/BOOT/, plus kernel.elf at the ESP root), and
-boots it in QEMU under OVMF firmware. The bootloader loads and hands off to
-the kernel, which paints the framebuffer blue and mirrors its boot trace to
-both COM1 and the screen. A normal run keeps the QEMU display off
-(-display none), but xtask captures the 1280x800 GOP surface through QEMU's
-monitor and verifies that it contains text as well as the expected success
-exit code and serial trace.
+## Documentation
 
-`xtask` also drives the keyboard test: once QEMU is up it connects to
-QEMU's monitor socket and injects `sendkey a` repeatedly, every 500ms, for
-as long as QEMU keeps running (or until a generous backstop expires) —
-which is what lets `cargo xtask run` prove the keyboard IRQ works with no
-human present, on hosts slow enough that boot alone eats several seconds.
-Running `qemu-system-x86_64` by hand instead (with a display attached)
-works the same way, except you type the keystroke yourself.
+- [docs/design.md](docs/design.md) — the design spec, with every decision
+  that changed recorded inline rather than rewritten
+- [docs/running.md](docs/running.md) — prerequisites, build/run, annotated
+  trace, failure-path test
+- [docs/plans/](docs/plans/) — per-milestone implementation plans
 
-The kernel's own trace — everything from here on is the kernel, not the
-bootloader — looks like this:
+## License
 
-```
-=== Rust_BL kernel ===
-framebuffer: 1280x800 stride=1280 @ 0x80000000
-kernel image: base=0x200000 size=0x11000
-GDT + TSS loaded (code selector 0x8)
-IDT loaded
-PICs remapped to vectors 32-47
-PIT programmed at 100 Hz
-8042 PS/2 controller initialised
-EXCEPTION: breakpoint at 0x200cc2 (execution will resume)
-selftest: breakpoint handled and execution resumed
-framebuffer painted
-frame allocator: 53195 usable frames (207 MiB)
-frame allocator: selftest passed
-heap: 1024 KiB @ 0x100000 (256 of 53195 frames in use)
-alloc: Box/Vec/String OK, heap balanced
-enabling interrupts
-key: 'a'
-timer: 100 ticks received — IRQ0 works
-waiting for a keypress...
-keyboard: 1 key event(s) received — IRQ1 works
-PASS: bootloader exited with expected code 33, and the screen has text
-```
-
-Two things worth noting about this trace: the `key: 'a'` lines can appear
-*before* the `timer: 100 ticks` line, because `xtask` starts sending
-keystrokes on its own schedule as soon as QEMU's monitor socket exists,
-independent of how far the kernel has gotten. And the exact
-`keyboard: N key event(s)` count is timing-dependent, not a fixed number:
-`xtask` injects `sendkey a` repeatedly (every 500ms, for as long as QEMU
-keeps running), and the kernel reports whatever has accumulated by the time
-it first checks — so seeing more than one event from what looks like "one
-keystroke" just means more than one injection had already landed.
-
-The `PASS` line only appears once both IRQ0 (timer) and IRQ1 (keyboard) have
-been proven live. A dead timer hangs until `xtask`'s 60-second timeout
-reports a boot hang; a dead keyboard reports itself after a bounded 10-second
-wait and exits with the failure code instead.
-
-The double-fault handler from Milestone 3 is still installed as the
-safety net — vector 8 in the IDT still runs on its own IST stack — but it
-no longer appears in this trace. Milestone 3 could afford to provoke one
-deliberately on every boot, as the kernel had nothing left to do
-afterward; the kernel now has to keep running to service IRQ0 and IRQ1, so
-nothing in the current boot path triggers a fault on purpose any more.
-
-An earlier version of this README predicted that Milestone 6 would add a
-stack guard page and make a genuine stack-overflow double fault happen
-naturally. It did not: a guard page means unmapping a page, which means
-managing page tables, and
-[docs/design.md](docs/design.md) deliberately keeps custom paging out of
-the MVP — the kernel still runs on the identity mapping UEFI leaves behind.
-Milestone 6 allocates *physical* memory only. Making the double-fault
-handler testable again therefore stays future work, alongside paging.
-
-## Testing the failure path
-
-```bash
-cargo xtask test
-```
-
-`cargo xtask run` only ever exercises the happy path, which leaves every
-validation branch in the ELF loader — magic, class, endianness, machine,
-bounds and overflow checks, entry-point range — untested. All of it could be
-deleted and `run` would still report PASS.
-
-`cargo xtask test` closes that gap: it corrupts the staged kernel's ELF magic,
-boots it, and checks that the bootloader *rejects* the image rather than
-jumping into it. The distinction matters because the loader validates before
-`ExitBootServices`: caught there it is a logged error and a clean exit, missed
-it is a triple fault with no logger left to report anything. The original
-image is restored afterward. Expected output ends with:
-
-```
-PASS: bootloader rejected the corrupted image (exit 35) instead of jumping into it
-```
+See [LICENSE](LICENSE).
