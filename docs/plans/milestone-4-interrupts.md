@@ -606,6 +606,23 @@ pub unsafe fn init(hz: u32) {
 - [ ] **Step 3: Add the timer handler and a tick counter to `idt.rs`**
 
 ```rust
+/// Catch-all for any PIC vector without a specific handler.
+///
+/// Registered across the whole remapped range before the real handlers
+/// overwrite their own slots, so no unmasked line can ever reach a
+/// non-present gate. That matters because a missing gate does not fail
+/// quietly: the CPU raises #GP, which `report_fault` turns into a halt —
+/// so one stray keystroke would kill the kernel.
+///
+/// Returns rather than halting: a spurious IRQ7 is a normal event, not a
+/// bug, and the right response is to acknowledge it and carry on.
+extern "x86-interrupt" fn unhandled_irq_handler(_frame: InterruptStackFrame) {
+    // Deliberately silent. This can fire repeatedly (a held key with no
+    // driver, a spurious IRQ7), and a print per occurrence would bury the
+    // real trace.
+    unsafe { crate::pic::end_of_interrupt(crate::pic::PIC2_OFFSET + 7) };
+}
+
 /// Ticks counted since interrupts were enabled.
 ///
 /// `static mut` rather than an atomic because this kernel is single-core
@@ -625,9 +642,21 @@ extern "x86-interrupt" fn timer_handler(_frame: InterruptStackFrame) {
 }
 ```
 
-Register it in `idt::init`:
+Register it in `idt::init`. The catch-all must be registered first, across the
+whole remapped PIC range, so that IRQ1 — unmasked below in Step 1's mask byte,
+but with no keyboard handler until Task 4 — lands on a real (if silent) gate
+instead of a non-present one. A non-present gate raises `#GP`, and this
+kernel's `#GP` handler halts: without this, `sti` plus one keypress kills the
+kernel.
 
 ```rust
+        // Gate the entire remapped PIC range first. The specific handlers
+        // below overwrite their own vectors; everything else lands here
+        // rather than on a non-present gate.
+        for vector in crate::pic::PIC1_OFFSET..=(crate::pic::PIC2_OFFSET + 7) {
+            set_handler(vector, unhandled_irq_handler as *const () as u64);
+        }
+
         set_handler(crate::pic::TIMER_VECTOR, timer_handler as *const () as u64);
 ```
 
@@ -804,6 +833,15 @@ Register it in `idt::init`:
 ```rust
         set_handler(crate::pic::KEYBOARD_VECTOR, keyboard_handler as *const () as u64);
 ```
+
+This overwrites vector 33 (`KEYBOARD_VECTOR`), which Task 3's catch-all loop
+pointed at `unhandled_irq_handler` as a stopgap. `set_handler` just replaces
+the entry, so no separate "un-register the catch-all" step is needed — but
+`KEYBOARD_VECTOR` now has a real reader, so delete the `#[expect(dead_code)]`
+attribute above its definition in `pic.rs`: the `expect` was written to fire
+exactly this warning once the constant became used, and its whole point is
+that leaving it in place past this moment would itself produce a build
+warning (`unfulfilled_lint_expectations`), not silence.
 
 - [ ] **Step 3: Require a keypress before success**
 

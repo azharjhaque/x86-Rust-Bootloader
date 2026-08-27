@@ -150,12 +150,40 @@ extern "x86-interrupt" fn breakpoint_handler(frame: InterruptStackFrame) {
     );
 }
 
+/// Catch-all for any PIC vector without a specific handler.
+///
+/// Registered across the whole remapped range before the real handlers
+/// overwrite their own slots, so no unmasked line can ever reach a
+/// non-present gate. That matters because a missing gate does not fail
+/// quietly: the CPU raises #GP, which `report_fault` turns into a halt —
+/// so one stray keystroke would kill the kernel.
+///
+/// Returns rather than halting: a spurious IRQ7 is a normal event, not a
+/// bug, and the right response is to acknowledge it and carry on.
+extern "x86-interrupt" fn unhandled_irq_handler(_frame: InterruptStackFrame) {
+    // Deliberately silent. This can fire repeatedly (a held key with no
+    // driver, a spurious IRQ7), and a print per occurrence would bury the
+    // real trace.
+    unsafe { crate::pic::end_of_interrupt(crate::pic::PIC2_OFFSET + 7) };
+}
+
 /// Ticks counted since interrupts were enabled.
 ///
-/// `static mut` rather than an atomic because this kernel is single-core
-/// and the only writer is the timer handler, which cannot be preempted by
-/// itself: the IDT gate is an *interrupt* gate, so IF is clear on entry.
-/// Readers use `without_interrupts` to get a torn-free view.
+/// `static mut` rather than an atomic because this kernel is single-core:
+/// an aligned `u64` load or store cannot tear on x86-64 on its own, so
+/// atomicity of a single access was never the issue. What `static mut`
+/// needs instead is mutual exclusion against the timer handler's
+/// read-modify-write (`TICKS += 1`), which is not a single atomic
+/// operation. The handler gets that for free because the IDT gate is an
+/// *interrupt* gate — IF is clear on entry, so the handler cannot be
+/// preempted by itself. Readers use `without_interrupts` to get the same
+/// exclusion against a `TICKS += 1` that is mid-flight.
+///
+/// One caveat: `without_interrupts`'s `cli`/`sti` are `options(nomem)`,
+/// so they are not compiler barriers — the compiler is free to reorder
+/// ordinary memory accesses across them. That is harmless for the single
+/// aligned word read here, but would not be enough on its own to protect
+/// multi-word state; that would need an explicit `compiler_fence` as well.
 static mut TICKS: u64 = 0;
 
 /// The number of timer ticks so far.
@@ -267,6 +295,13 @@ extern "x86-interrupt" fn double_fault_handler(
 /// selector that function installs.
 pub unsafe fn init() {
     unsafe {
+        // Gate the entire remapped PIC range first. The specific handlers
+        // below overwrite their own vectors; everything else lands here
+        // rather than on a non-present gate.
+        for vector in crate::pic::PIC1_OFFSET..=(crate::pic::PIC2_OFFSET + 7) {
+            set_handler(vector, unhandled_irq_handler as *const () as u64);
+        }
+
         set_handler(0, divide_error_handler as *const () as u64);
         set_handler(3, breakpoint_handler as *const () as u64);
         set_handler(6, invalid_opcode_handler as *const () as u64);

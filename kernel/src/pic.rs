@@ -71,7 +71,12 @@ pub unsafe fn init() {
 
         // OCW1: the interrupt masks. A set bit masks that IRQ. Unmask only
         // IRQ0 (timer) and IRQ1 (keyboard); everything else stays off until
-        // something is written to handle it.
+        // something is written to handle it. Bit 2 here is the master's
+        // cascade line, the same line ICW3 wired to the slave above — so
+        // as long as it stays masked, IRQ8-15 cannot reach the CPU no
+        // matter what PIC2_DATA's own mask says. Whoever first unmasks the
+        // RTC or PS/2 mouse (both behind the slave) will need to clear
+        // this bit too, or get silence with the cause one chip away.
         outb(PIC1_DATA, 0b1111_1100);
         outb(PIC2_DATA, 0b1111_1111);
     }

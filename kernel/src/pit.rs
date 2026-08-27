@@ -15,8 +15,14 @@ const BASE_FREQUENCY: u32 = 1_193_182;
 /// Program channel 0 to raise IRQ0 at roughly `hz` times per second.
 ///
 /// # Safety
-/// Call once, with interrupts disabled.
+/// Call once, with interrupts disabled. `hz` must be in `19..=BASE_FREQUENCY`
+/// — below ~18.2 Hz the divisor no longer fits in the chip's 16-bit
+/// counter, and 0 Hz would divide by zero.
 pub unsafe fn init(hz: u32) {
+    // Below ~18.2 Hz the divisor exceeds u16 and the `as` cast would wrap
+    // silently — init(10) would give ~22 Hz, not 10.
+    assert!(hz >= 19 && hz <= BASE_FREQUENCY, "PIT frequency out of range");
+
     // Integer division truncates, so the real rate is slightly above `hz`.
     // At 100 Hz the divisor is 11931 and the error is under 0.01%, which is
     // irrelevant for a tick counter.
