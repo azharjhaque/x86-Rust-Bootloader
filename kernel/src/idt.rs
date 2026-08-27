@@ -196,6 +196,30 @@ extern "x86-interrupt" fn timer_handler(_frame: InterruptStackFrame) {
     unsafe { crate::pic::end_of_interrupt(crate::pic::TIMER_VECTOR) };
 }
 
+/// Keys received since interrupts were enabled.
+///
+/// Same reasoning as `TICKS` above: single-core, single aligned `u64`, so
+/// the interrupt gate's implicit `cli` on entry is what actually protects
+/// the read-modify-write in `keyboard_handler`, and `without_interrupts`
+/// gives readers the same exclusion.
+static mut KEYS_SEEN: u64 = 0;
+
+/// The number of translatable keypresses received so far.
+pub fn keys_seen() -> u64 {
+    crate::interrupts::without_interrupts(|| unsafe { KEYS_SEEN })
+}
+
+extern "x86-interrupt" fn keyboard_handler(_frame: InterruptStackFrame) {
+    // The byte must be read whether or not we can translate it: leaving it
+    // in the controller's output buffer means no further keyboard IRQ ever
+    // arrives.
+    if let Some(ascii) = unsafe { crate::keyboard::read_key() } {
+        unsafe { KEYS_SEEN += 1 };
+        crate::kprintln!("key: {:?}", ascii as char);
+    }
+    unsafe { crate::pic::end_of_interrupt(crate::pic::KEYBOARD_VECTOR) };
+}
+
 /// Print a uniform report for a CPU exception and stop.
 ///
 /// Every fault handler funnels through this so the output format is one
@@ -313,6 +337,7 @@ pub unsafe fn init() {
             crate::gdt::DOUBLE_FAULT_IST_INDEX,
         );
         set_handler(crate::pic::TIMER_VECTOR, timer_handler as *const () as u64);
+        set_handler(crate::pic::KEYBOARD_VECTOR, keyboard_handler as *const () as u64);
         load();
     }
 }

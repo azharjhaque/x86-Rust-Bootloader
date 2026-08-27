@@ -7,9 +7,11 @@ use boot_info::{BootInfo, PixelFormatKind};
 mod gdt;
 mod idt;
 mod interrupts;
+mod keyboard;
 mod pic;
 mod pit;
 mod port;
+mod ps2;
 mod qemu_exit;
 mod serial;
 
@@ -77,6 +79,22 @@ fn kernel_main(info: &BootInfo) -> ! {
     }
     kprintln!("timer: {TICKS_REQUIRED} ticks received — IRQ0 works");
 
+    // Now wait for a keystroke. `xtask` injects one through QEMU's monitor;
+    // a human running QEMU directly can just type. Bound the wait in ticks
+    // so a dead IRQ1 reports itself rather than hanging until the harness
+    // timeout — the timer is known good by this point, so it makes a
+    // serviceable clock.
+    kprintln!("waiting for a keypress...");
+    let deadline = idt::ticks() + TIMER_HZ as u64 * 10;
+    while idt::keys_seen() == 0 {
+        if idt::ticks() > deadline {
+            kprintln!("keyboard: no input within 10s — IRQ1 is not delivering");
+            qemu_exit::exit(qemu_exit::QemuExitCode::Failed);
+        }
+        interrupts::hlt();
+    }
+    kprintln!("keyboard: {} keypress(es) received — IRQ1 works", idt::keys_seen());
+
     qemu_exit::exit(qemu_exit::QemuExitCode::Success)
 }
 
@@ -93,6 +111,9 @@ fn init() {
 
     unsafe { pit::init(TIMER_HZ) };
     kprintln!("PIT programmed at {TIMER_HZ} Hz");
+
+    unsafe { ps2::init() };
+    kprintln!("8042 PS/2 controller initialised");
 }
 
 /// Boot-time checks that the tables `init` installed actually work.

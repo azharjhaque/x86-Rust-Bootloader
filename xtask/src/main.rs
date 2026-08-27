@@ -1,5 +1,7 @@
 use std::env;
 use std::fs;
+use std::io::Write as _;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::thread;
@@ -20,6 +22,10 @@ const FAILURE_EXIT_CODE: i32 = 35;
 /// it. Without this, a boot hang blocks `cargo xtask run` forever with no
 /// way to report failure.
 const QEMU_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Where QEMU's monitor socket lives. `xtask` connects to this to inject
+/// keystrokes, which is how the keyboard IRQ gets tested without a human.
+const MONITOR_SOCKET: &str = "/tmp/rust_bl_monitor.sock";
 
 const USAGE: &str = "Usage:
   cargo xtask run     Build, stage the ESP, and boot in QEMU (expects exit 33)
@@ -206,12 +212,50 @@ fn build_and_stage(root: &Path) -> Result<Staged, String> {
     Ok(Staged { esp_dir, vars_copy })
 }
 
+/// Type into the guest through QEMU's monitor.
+///
+/// Spawned on its own thread because QEMU is running concurrently: the
+/// keystrokes have to arrive *after* the kernel has enabled interrupts, and
+/// there is no signal for that other than time. Sending several spread out
+/// over a few seconds is simpler and more robust than trying to synchronise,
+/// and the kernel only needs one to arrive.
+fn inject_keystrokes() {
+    thread::spawn(|| {
+        // Wait for QEMU to create the socket.
+        let mut stream = None;
+        for _ in 0..100 {
+            thread::sleep(Duration::from_millis(100));
+            if let Ok(s) = UnixStream::connect(MONITOR_SOCKET) {
+                stream = Some(s);
+                break;
+            }
+        }
+        let Some(mut stream) = stream else {
+            eprintln!("note: could not reach the QEMU monitor; no keys will be injected");
+            return;
+        };
+
+        // The kernel spends about a second counting timer ticks before it
+        // starts looking for input, so start after that and keep going.
+        for _ in 0..10 {
+            thread::sleep(Duration::from_millis(500));
+            if stream.write_all(b"sendkey a\n").is_err() {
+                // QEMU exited — the run is over, which is the normal way
+                // this loop ends.
+                return;
+            }
+        }
+    });
+}
+
 /// Launch QEMU against the staged ESP and wait for it to exit.
 ///
 /// Returns the process exit code, or `None` if QEMU was terminated by a
 /// signal. Interpreting that code is the caller's job — `run` and `test`
 /// expect different ones.
 fn boot_qemu(staged: &Staged) -> Result<Option<i32>, String> {
+    let _ = fs::remove_file(MONITOR_SOCKET);
+
     let mut child = Command::new("qemu-system-x86_64")
         .arg("-drive")
         .arg(format!("if=pflash,format=raw,readonly=on,file={OVMF_CODE}"))
@@ -243,12 +287,16 @@ fn boot_qemu(staged: &Staged) -> Result<Option<i32>, String> {
         .arg("none")
         .arg("-serial")
         .arg("stdio")
+        .arg("-monitor")
+        .arg(format!("unix:{MONITOR_SOCKET},server,nowait"))
         .spawn()
         .map_err(|e| {
             format!(
                 "failed to launch qemu-system-x86_64 (is it installed? try: sudo apt install qemu-system-x86): {e}"
             )
         })?;
+
+    inject_keystrokes();
 
     let deadline = Instant::now() + QEMU_TIMEOUT;
     let status = loop {

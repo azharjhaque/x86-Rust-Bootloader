@@ -8,11 +8,14 @@ rather than delegated to an existing library, milestone by milestone.
 
 ## Status
 
-✅ Milestone 3 of 6 complete and verified: the kernel now reports over its
-own COM1 serial driver, builds and loads its own GDT and TSS, installs a
-256-entry IDT, handles a breakpoint exception, and deliberately provokes and
-catches a double fault on a dedicated IST stack instead of letting the CPU
-triple-fault and reset the machine.
+✅ Milestone 4 of 6 complete and verified: the kernel responds to the
+outside world. The two 8259 PICs are remapped off the CPU's own exception
+vectors, the PIT drives a 100 Hz timer tick, the 8042 PS/2 controller is
+brought up and its keyboard IRQ enabled, and a catch-all handler covers
+every remapped PIC vector so no unmasked IRQ can ever land on a non-present
+gate. `xtask` proves the keyboard path automatically by injecting a
+keystroke through QEMU's monitor, so the whole run needs no human at the
+keyboard.
 
 See [docs/design.md](docs/design.md) for the full design, and
 [docs/plans/](docs/plans/) for implementation plans per milestone.
@@ -22,7 +25,9 @@ See [docs/design.md](docs/design.md) for the full design, and
 - [x] 1. Toolchain bootstrap — empty UEFI app boots in QEMU/OVMF
 - [x] 2. Bootloader: ELF loader, memory map, framebuffer, handoff to kernel
 - [x] 3. Kernel: GDT, IDT, double-fault handler
-- [ ] 4. Kernel: PIT timer + PS/2 keyboard interrupts, framebuffer text
+- [x] 4. Kernel: PIT timer + PS/2 keyboard interrupts (framebuffer text
+      rendering deferred to Milestone 6 — see
+      [docs/plans/milestone-4-interrupts.md](docs/plans/milestone-4-interrupts.md))
 - [ ] 5. Kernel: physical frame allocator + heap allocator
 - [ ] 6. Polish: docs, screenshots/GIF, write-up
 
@@ -79,43 +84,51 @@ Once the kernel has taken over from the UEFI console, it reports its own
 progress on the same serial console via a COM1 driver, so its output now
 appears right after the bootloader's handing off to kernel line.
 
+`xtask` also drives the keyboard test: once QEMU is up it connects to
+QEMU's monitor socket and injects `sendkey a` a few times over the following
+seconds, which is what lets `cargo xtask run` prove the keyboard IRQ works
+with no human present. Running `qemu-system-x86_64` by hand instead (with a
+display attached) works the same way, except you type the keystroke
+yourself.
+
 The kernel's own trace — everything from here on is the kernel, not the
 bootloader — looks like this:
 
 ```
 === Rust_BL kernel ===
 framebuffer: 1280x800 stride=1280 @ 0x80000000
-kernel image: base=0x200000 size=0xd000
+kernel image: base=0x200000 size=0xf000
 GDT + TSS loaded (code selector 0x8)
-double-fault IST index: 0
 IDT loaded
-EXCEPTION: breakpoint at 0x200797 (execution will resume)
-resumed after breakpoint
+PICs remapped to vectors 32-47
+PIT programmed at 100 Hz
+8042 PS/2 controller initialised
+EXCEPTION: breakpoint at 0x200af2 (execution will resume)
+selftest: breakpoint handled and execution resumed
 framebuffer painted
-kernel reached the end of milestone 3 setup
-
-about to raise #UD with no vector-6 handler installed;
-the CPU should escalate it to a double fault...
-EXCEPTION: double fault
-  faulting instruction: 0x200928
-  interrupted stack:    0xdfa7e60
-  handler stack:        0x20be98
-  fault stack spans:    0x208010..0x20c010
-  handler is running on the IST stack — the machine did not reset
+enabling interrupts
+key: 'a'
+key: 'a'
+timer: 100 ticks received — IRQ0 works
+waiting for a keypress...
+keyboard: 2 keypress(es) received — IRQ1 works
 PASS: bootloader exited with expected code 33
 ```
 
-The `EXCEPTION: double fault` near the end is expected, not a crash: the
-kernel deliberately executes `ud2` (an invalid opcode) with no handler
-registered for vector 6, so the CPU escalates the fault it can't deliver
-into a double fault (vector 8). That double fault is caught by a handler
-running on its own dedicated IST stack — proven above by the handler stack
-address falling inside the reported fault-stack range — rather than the
-alternative, which is the CPU resetting the machine outright (a triple
-fault, invisible to this log). The `PASS` line only appears because the
-double-fault handler confirms both that this was the fault it expected and
-that it ran on the IST stack; any other unhandled exception, or a broken
-IST switch, reports failure instead.
+Two things worth noting about this trace: the `key: 'a'` lines can appear
+*before* the `timer: 100 ticks` line, because `xtask` starts sending
+keystrokes on its own schedule as soon as QEMU's monitor socket exists,
+independent of how far the kernel has gotten. And `keyboard: 2 keypress(es)`
+from a single injected `sendkey a` is expected, not a double-count: QEMU's
+`sendkey` produces a make code, a key-repeat, and a break code on real
+hardware timing, and the keyboard driver counts every make/repeat while
+ignoring the break (bit 7 set) — so one injected keystroke can register as
+more than one.
+
+The `PASS` line only appears once both IRQ0 (timer) and IRQ1 (keyboard) have
+been proven live. A dead timer hangs until `xtask`'s 60-second timeout
+reports a boot hang; a dead keyboard reports itself after a bounded 10-second
+wait and exits with the failure code instead.
 
 ## Testing the failure path
 
