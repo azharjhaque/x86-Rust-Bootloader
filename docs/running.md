@@ -156,14 +156,41 @@ unsigned — and boot in UEFI mode rather than CSM/legacy.
 
 In rough order of how likely they are to stop you:
 
-**The keyboard almost certainly will not work.** The driver is legacy PS/2
-on IRQ1. Any machine that exposes its keyboard over USB needs an xHCI
-controller driver and a USB HID driver, neither of which exists here. Some
-firmware emulates PS/2 for USB keyboards, but that emulation is generally
-withdrawn at `ExitBootServices`, which is exactly when the kernel starts
-caring. Expect the kernel to reach `waiting for a keypress...`, sit for ten
-seconds, print `keyboard: no input within 10s - IRQ1 is not delivering`, and
-halt.
+**The keyboard works only if it is behind the i8042 controller.** This is
+the dividing line, and it is not the same as "real hardware versus QEMU".
+
+If the machine has a genuine 8042 — a desktop with a PS/2 port and a PS/2
+keyboard, or one of the many laptops whose built-in keyboard is wired
+through the embedded controller as i8042 — then it should work.
+`ps2::init` reads the controller's existing configuration byte, enables the
+IRQ1 interrupt and the port clock, and writes it back, deliberately leaving
+the translation bit alone. Firmware normally leaves translation enabled,
+which makes the controller emit scancode set 1, which is what
+`keyboard::read_key` decodes. Nothing in that path is QEMU-specific.
+
+If the keyboard is USB HID — most modern laptops, and any desktop with a USB
+keyboard and no PS/2 port — it will not. That needs an xHCI controller
+driver and a USB HID driver, neither of which exists here. Firmware often
+emulates PS/2 for USB keyboards during boot services, but that emulation is
+generally withdrawn at `ExitBootServices`, which is exactly when the kernel
+starts to care.
+
+When it does work, expect *continuous* echo rather than a single keystroke:
+with no `isa-debug-exit` device present, the kernel prints its IRQ1
+confirmation, falls through `qemu_exit::exit` into the `hlt` loop with
+interrupts still enabled, and keeps printing a `key: 'x'` line for every
+key you press. Three limits remain even then — no modifier handling, so
+lowercase only; no `0xE0` extended scancodes, so arrow keys and similar are
+ignored; and if some firmware has left controller translation *off*, the
+keyboard sends set 2 and you will get the wrong letters rather than
+nothing.
+
+When it does not work, the failure is clean: `waiting for a keypress...`,
+ten seconds, then `keyboard: no input within 10s - IRQ1 is not delivering`,
+then a halt. A machine with no 8042 at all is handled earlier and more
+explicitly — every wait in `ps2::init` is bounded by an iteration budget
+and reports which step timed out, so a missing controller produces a named
+diagnostic instead of a silent hang.
 
 **There is probably no serial port.** The UART driver targets COM1 at
 `0x3F8`, which most machines built in the last fifteen years do not have.
@@ -195,12 +222,16 @@ the interactive QEMU screenshot possible.
 
 ### What success looks like
 
-A blue screen with the boot trace up to `waiting for a keypress...`, then
-the keyboard timeout message ten seconds later, then nothing. Reaching the
-allocator lines means the ELF loader, the handoff, the GDT and IDT, the
-framebuffer console, and both allocators all worked on hardware they have
-never seen. The keyboard failure at the end is the known and expected
-limit, not a regression.
+A blue screen with the boot trace through both allocators and the timer
+confirmation. From there it depends on the keyboard: on a machine with a
+real 8042 you should be able to type, each key adding a `key: 'x'` line,
+indefinitely. On a USB-only machine you get the ten-second timeout message
+and a halt instead.
+
+Either way, reaching the allocator lines means the ELF loader, the handoff,
+the GDT and IDT, the framebuffer console, and both allocators all worked on
+hardware they have never seen. A keyboard timeout at the end is the known
+limit of a PS/2-only driver, not a regression.
 
 ## Testing the failure path
 
