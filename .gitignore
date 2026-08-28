@@ -3,3 +3,5 @@
 /target/
 docs/plans/
 docs/superpowers/
+tools/ppm_to_png.py
+tools/capture_screenshot.py

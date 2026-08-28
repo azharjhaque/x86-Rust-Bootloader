@@ -52,6 +52,12 @@ on hosts slow enough that boot alone eats several seconds. Running
 `qemu-system-x86_64` by hand instead (with a display attached) works the
 same way, except you type the keystroke yourself.
 
+If you do run QEMU by hand, close it before running `cargo xtask run` again,
+or point it at a copy of `target/OVMF_VARS.fd`. That pflash drive is opened
+read-write, and two QEMU instances sharing it corrupt the firmware's boot
+entries: the guest stops reaching the bootloader, and you get a 640x480
+firmware-mode screen with an empty serial log.
+
 ## The boot trace
 
 The kernel's own trace — everything from here on is the kernel, not the
@@ -233,32 +239,8 @@ regions, sub-page runs, the frame at physical zero). `xtask` covers
 screen-capture validation (PPM parsing, dimension and maxval checks,
 truncated payloads).
 
-## Regenerating the screenshot
+## The screenshot
 
-```bash
-cargo xtask run                        # stage the ESP first
-python3 tools/capture_screenshot.py    # writes docs/images/boot.png
-```
-
-Two details in that script are load-bearing and easy to get wrong if you
-reimplement it:
-
-**It omits `-device isa-debug-exit`,** which `xtask` always passes. With
-that device, `qemu_exit::exit` shuts QEMU down with a verdict exit code.
-Without it, the port write goes nowhere and `exit` falls through into its
-own `hlt` loop — with interrupts still enabled. IRQ1 keeps firing, so
-keystrokes keep reaching the framebuffer. That fallback is what makes an
-interactive screenshot possible, and it is the idle echo loop
-[design.md](design.md)'s boot flow describes.
-
-**It copies `OVMF_VARS.fd` before booting.** That pflash drive is opened
-read-write. Sharing one file between two concurrent QEMU instances — this
-script and a manual `qemu-system-x86_64` in another terminal, say —
-corrupts the firmware's boot entries: the guest never reaches the
-bootloader, and the capture comes back as a 640x480 firmware-mode screen
-with an empty serial log.
-
-`tools/ppm_to_png.py` does the PPM→PNG conversion on its own if you have a
-capture already. Both scripts are one-off authoring tools, like
-`tools/generate_font.py`: their output is committed, and building or testing
-the project never runs them.
+`docs/images/boot.png` is a QEMU screen capture, taken with the kernel idling
+in its `hlt` loop after `hello world` was typed into it. It is committed, so
+nothing in the build or test path regenerates it.
