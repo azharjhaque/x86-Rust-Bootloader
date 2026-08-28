@@ -141,7 +141,7 @@ Step-by-step instructions and the full list of failure modes are in
 ├── boot_info/    # shared #[repr(C)] handoff ABI between the two
 ├── kernel/       # freestanding kernel ELF, no_std, x86_64-unknown-none
 ├── xtask/        # build automation: stages the ESP, launches QEMU
-├── tools/        # one-off authoring scripts (font, screenshot)
+├── tools/        # font generator (run once; its output is committed)
 └── docs/         # design spec and running guide
 ```
 
