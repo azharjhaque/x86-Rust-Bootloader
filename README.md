@@ -1,12 +1,13 @@
 # Rust_BL — A UEFI Bootloader + Kernel, Written From Scratch in Rust
 
+
 A from-scratch UEFI bootloader and minimal x86_64 kernel, written in Rust
 with no OS-provided runtime. No `bootloader` crate, no borrowed kernel, no
 allocator crate: the boot flow, ELF loading, interrupt handling, and memory
 management are all implemented here rather than delegated to a library.
 
 ![The kernel booted in QEMU, showing its allocator trace and live keyboard input](docs/images/boot.png)
-
+<img width="4707" height="3922" alt="IMG_3742 (1)" src="https://github.com/user-attachments/assets/3068a6f1-0575-4bb3-b732-cc0972085950" />
 That screenshot is the kernel's own framebuffer console — glyphs blitted
 pixel by pixel from an embedded 8×16 bitmap font onto a UEFI GOP surface,
 with no firmware text services involved (they are gone by then). The
